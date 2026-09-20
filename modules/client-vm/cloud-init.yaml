@@ -1,0 +1,13 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - postgresql-contrib
+
+runcmd:
+  # This machine only runs pgbench/psql against remote servers — the local
+  # PostgreSQL instance pulled in as a dependency of postgresql-contrib is
+  # not needed and is stopped so it doesn't consume CPU/RAM during tests.
+  - systemctl stop postgresql
+  - systemctl disable postgresql

@@ -1,49 +1,48 @@
 # Azure PostgreSQL: IaaS vs PaaS Benchmark
 
-Repozytorium wspierające pracę inżynierską *"Analiza porównawcza wydajności, kosztów i wykorzystania zasobów chmurowych w relacyjnych systemach bazodanowych w modelach IaaS oraz PaaS"* (Politechnika Poznańska, Wydział Informatyki i Telekomunikacji).
+Repository supporting the engineering thesis *"Comparative analysis of performance, costs, and utilization of cloud resources in relational database systems in IaaS and PaaS models"* (Poznan University of Technology, Faculty of Computing and Telecommunication).
 
-Kod automatyzuje wdrożenie i benchmarking czterech konfiguracji PostgreSQL na Microsoft Azure:
+The code automates the deployment and benchmarking of four PostgreSQL configurations on Microsoft Azure:
 
-| # | Model | Konfiguracja |
+| # | Model | Configuration |
 |---|-------|--------------|
 | 1 | IaaS | `Standard_D2s_v5` + Standard SSD E10 (128 GB) |
 | 2 | IaaS | `Standard_D2s_v5` + Premium SSD P10 (128 GB) |
 | 3 | PaaS | PostgreSQL Flexible Server — Burstable B1ms |
 | 4 | PaaS | PostgreSQL Flexible Server — General Purpose D2s |
 
-## Wymagania
+## Requirements
 
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.7
-- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), zalogowane (`az login`)
-- Aktywna subskrypcja Azure z uprawnieniami do tworzenia zasobów
-- `psql` / `pgbench` — opcjonalnie, do lokalnego debugowania (benchmark właściwy uruchamia się zdalnie, z osobnej VM-klienta)
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), logged in (`az login`)
+- An active Azure subscription with permissions to create resources
+- `psql` / `pgbench` — optional, for local debugging (the actual benchmark runs remotely, from a separate client VM)
 
-## Struktura repozytorium
+## Repository structure
 
 .
-├── bootstrap/ # jednorazowo: Storage Account pod remote state Terraforma
+├── bootstrap/ # one-time: Storage Account for Terraform remote state
 ├── modules/
-│ ├── network/ # VNet, subnet, NSG — wspólne dla wszystkich wariantów
-│ ├── iaas-vm/ # VM + parametryzowany typ dysku (IaaS)
-│ ├── paas-postgres/ # Flexible Server + parametryzowany tier (PaaS)
-│ └── client-vm/ # VM-klient do uruchamiania pgbench
+│ ├── network/ # VNet, subnet, NSG — shared across all variants
+│ ├── iaas-vm/ # VM + parameterized disk type (IaaS)
+│ ├── paas-postgres/ # Flexible Server + parameterized tier (PaaS)
+│ └── client-vm/ # client VM for running pgbench
 ├── environments/
 │ ├── iaas-standard-ssd/
 │ ├── iaas-premium-ssd/
 │ ├── paas-burstable/
 │ └── paas-general-purpose/
-├── scripts/ # inicjalizacja bazy i uruchamianie testów pgbench
-└── .github/workflows/ # (opcjonalnie) automatyzacja CI
+├── scripts/ # database initialization and pgbench test runners
+└── .github/workflows/ # (optional) CI automation
 
 
+Each configuration under `environments/` has its **own, isolated Terraform state** — this allows independent `apply`/`destroy` of a single variant without risk to the others.
 
-Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** — pozwala to na niezależne `apply`/`destroy` pojedynczego wariantu bez ryzyka dla pozostałych.
+## Usage
 
-## Uruchomienie
+### 1. Bootstrap (one-time)
 
-### 1. Bootstrap (jednorazowo)
-
-Tworzy Storage Account do przechowywania stanu Terraforma (remote backend, poza repozytorium):
+Creates the Storage Account used to hold Terraform state (remote backend, kept out of the repository):
 
 ```bash
 cd bootstrap
@@ -51,34 +50,31 @@ terraform init
 terraform apply
 ```
 
-### 2. Wdrożenie wybranej konfiguracji
+### 2. Deploy a chosen configuration
 
 ```bash
-cd environments/iaas-standard-ssd   # lub inny wariant
+cd environments/iaas-standard-ssd   # or another variant
 terraform init
 terraform apply
 ```
 
-### 3. Uruchomienie benchmarku
+### 3. Run the benchmark
 
 ```bash
-./scripts/init-db.sh <adres-serwera-bazy>        # jednorazowo dla danej konfiguracji: pgbench -i -s 1000
-./scripts/run-benchmark.sh <adres-serwera-bazy>   # warm-up 2 min + pomiar 12 min + VACUUM
-./scripts/collect-results.sh                      # zbiera logi/wyniki lokalnie
+./scripts/init-db.sh <db-server-address>        # once per configuration: pgbench -i -s 1000
+./scripts/run-benchmark.sh <db-server-address>   # 2 min warm-up + 12 min measured run + VACUUM
+./scripts/collect-results.sh                      # collects logs/results locally
 ```
 
-### 4. Zniszczenie zasobów (kluczowe dla budżetu)
+### 4. Destroy resources (critical for the budget)
 
 ```bash
 terraform destroy
 ```
 
-> **Uwaga:** budżet projektu to $100 (grant uczelniany). Pozostawiona na noc maszyna `Standard_D2s_v5` lub instancja PaaS General Purpose potrafi zauważalnie nadgryźć budżet. Zawsze uruchamiaj `terraform destroy` natychmiast po zakończeniu pomiarów danej konfiguracji.
+> **Note:** the project budget is $100 (university grant). Leaving a `Standard_D2s_v5` VM or a General Purpose PaaS instance running overnight can noticeably eat into the budget. Always run `terraform destroy` immediately after finishing measurements for a given configuration.
 
-## Plan eksperymentu
+## Context
 
-Pełny opis metodyki (scale factor, parametry pgbench, plan statystyczny, randomizacja) — patrz `CLAUDE.md` oraz rozdział 4 pracy.
+This repository was created as part of an engineering thesis, Poznan University of Technology, 2026/2027.
 
-## Kontekst
-
-Repozytorium powstało jako część pracy inżynierskiej, Politechnika Poznańska, 2026/2027.
