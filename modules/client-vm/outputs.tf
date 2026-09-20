@@ -1,15 +1,15 @@
 output "vm_id" {
-  value = azurerm_linux_virtual_machine.this.id
+  value = module.vm.vm_id
 }
 
 output "vm_name" {
-  value = azurerm_linux_virtual_machine.this.name
+  value = module.vm.vm_name
 }
 
 output "public_ip_address" {
-  value = azurerm_public_ip.this.ip_address
+  value = module.vm.public_ip_address
 }
 
 output "private_ip_address" {
-  value = azurerm_network_interface.this.private_ip_address
+  value = module.vm.private_ip_address
 }

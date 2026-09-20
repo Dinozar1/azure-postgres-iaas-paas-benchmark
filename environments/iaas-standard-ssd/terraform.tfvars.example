@@ -1,0 +1,6 @@
+environment_name       = "iaas-standard-ssd"
+location                = "polandcentral"
+admin_source_ip         = "YOUR_PUBLIC_IP/32"   # curl ifconfig.me
+ssh_public_key           = "ssh-ed25519 AAAA... your-key-comment"
+data_disk_type           = "StandardSSD_LRS"
+postgres_admin_password  = "CHANGE_ME_STRONG_PASSWORD"

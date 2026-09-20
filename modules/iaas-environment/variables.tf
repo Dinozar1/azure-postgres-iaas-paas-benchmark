@@ -6,11 +6,10 @@ variable "environment_name" {
 variable "location" {
   description = "Azure region for all resources in this environment."
   type        = string
-  default     = "polandcentral"
 }
 
 variable "admin_source_ip" {
-  description = "CIDR allowed to reach the VMs over SSH — your current public IP, e.g. \"1.2.3.4/32\". Check with: curl ifconfig.me"
+  description = "CIDR allowed to reach the VMs over SSH — your current public IP, e.g. \"1.2.3.4/32\"."
   type        = string
 }
 

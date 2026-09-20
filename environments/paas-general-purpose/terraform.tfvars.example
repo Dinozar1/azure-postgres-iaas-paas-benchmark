@@ -1,0 +1,7 @@
+environment_name       = "paas-general-purpose"
+location                = "polandcentral"
+admin_source_ip         = "YOUR_PUBLIC_IP/32"
+ssh_public_key           = "ssh-ed25519 AAAA... your-key-comment"
+server_name               = "psql-thesis-pgbench-gp"
+sku_name                   = "GP_Standard_D2s_v3"
+postgres_admin_password    = "CHANGE_ME_STRONG_PASSWORD"

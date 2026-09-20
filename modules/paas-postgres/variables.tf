@@ -26,7 +26,7 @@ variable "sku_name" {
     available in your region before applying:
     az postgres flexible-server list-skus --location <region>
   EOT
-  type = string
+  type        = string
 }
 
 variable "storage_mb" {

@@ -1,13 +1,17 @@
+locals {
+  common_tags = {
+    project     = "thesis-iaas-paas-postgres"
+    environment = var.environment_name
+  }
+}
+
 resource "azurerm_virtual_network" "this" {
   name                = var.vnet_name
   resource_group_name = var.resource_group_name
   location            = var.location
   address_space       = var.vnet_address_space
 
-  tags = {
-    project     = "thesis-iaas-paas-postgres"
-    environment = var.environment_name
-  }
+  tags = local.common_tags
 }
 
 resource "azurerm_subnet" "compute" {
@@ -39,10 +43,7 @@ resource "azurerm_network_security_group" "compute" {
   # client VM -> database VM on port 5432) is allowed by the default
   # "AllowVnetInBound" rule and needs no explicit entry here.
 
-  tags = {
-    project     = "thesis-iaas-paas-postgres"
-    environment = var.environment_name
-  }
+  tags = local.common_tags
 }
 
 resource "azurerm_subnet_network_security_group_association" "compute" {
