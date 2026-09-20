@@ -11,6 +11,9 @@ terraform {
 
 provider "azurerm" {
   features {}
+
+  # See bootstrap/main.tf for why: providers are already registered manually.
+  skip_provider_registration = true
 }
 
 module "environment" {

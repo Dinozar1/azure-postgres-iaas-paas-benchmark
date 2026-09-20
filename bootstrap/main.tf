@@ -14,6 +14,13 @@ terraform {
 
 provider "azurerm" {
   features {}
+
+  # Skip Terraform's automatic check/registration of the full list of Azure
+  # resource providers on every run — we've already registered exactly the
+  # ones this project needs (see CLAUDE.md), and on this restricted student
+  # subscription the blanket check is slow and prone to transient failures
+  # (DNS timeouts, providers we don't use that may not even be registrable).
+  skip_provider_registration = true
 }
 
 variable "location" {

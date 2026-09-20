@@ -42,3 +42,7 @@ terraform.rc
 # Optional: ignore plan files saved before destroying Terraform configuration
 # Uncomment the line below if you want to ignore planout files.
 # planout
+
+# Raw benchmark output pulled by scripts/run-benchmark.sh — regenerable data,
+# not source. Commit derived summary CSVs/analysis separately if needed.
+results/

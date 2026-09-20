@@ -96,10 +96,20 @@ azure-postgres-iaas-paas-benchmark/
 │   ├── iaas-premium-ssd/
 │   ├── paas-burstable/
 │   └── paas-general-purpose/
-├── scripts/                      # NIEROZPOCZĘTE — init-db.sh, run-benchmark.sh, collect-results.sh
-│   │                              # (planowane: wspólny scripts/lib/common.sh z parametrami benchmarku)
+├── scripts/
+│   ├── lib/common.sh              # wspólna konfiguracja (parametry pgbench, SSH, .pgpass) + helpery
+│   ├── init-db.sh <env>           # pgbench -i -s 1000 (raz na środowisko, przed pierwszym run-benchmark.sh)
+│   ├── run-benchmark.sh <env>     # warm-up + pomiar 12min + VACUUM ANALYZE; ściąga wyniki do results/
+│   └── collect-results.sh <env>   # agreguje results/<env>/*/summary.txt → results/<env>/summary.csv
+├── results/                      # (gitignored) surowe wyniki pgbench per przebieg, ściągane z VM-klienta
 └── .github/workflows/             # opcjonalnie: terraform fmt -check + validate jako CI gate
 ```
+
+### Jak działają `scripts/*.sh`
+- Uruchamiane **lokalnie** (nie na VM), łączą się przez SSH (`~/.ssh/id_ed25519_pgbench`) do VM-klienta i tam zdalnie odpalają `pgbench`/`psql` — sama VM bazy nigdy nie jest dotykana bezpośrednio (dla IaaS: prywatny IP w tej samej podsieci; dla PaaS: publiczny FQDN Flexible Servera).
+- Hasło do bazy nigdy nie trafia do argumentów `ssh`/wiersza poleceń (ryzyko re-parsowania przez zdalną powłokę) — zamiast tego skrypt zapisuje `~/.pgpass` na VM-kliencie (`chmod 600`) przed każdym uruchomieniem, `pgbench`/`psql` czytają je automatycznie.
+- Kolejność użycia: `terraform apply` w danym `environments/<env>` → `init-db.sh <env>` (raz) → `run-benchmark.sh <env>` (N razy, per plan statystyczny) → `collect-results.sh <env>` (po serii przebiegów).
+- Login/hasło do bazy dla PaaS pobierane z outputów Terraforma (`db_admin_login`, `db_name`, `db_fqdn`) — brak zahardkodowanych wartości mogących się rozjechać z `terraform.tfvars`. Dla IaaS `postgres`/`pgbench_db` są zahardkodowane w skrypcie zgodnie z `modules/iaas-vm/cloud-init.tpl` (tam też nie są parametryzowane).
 
 Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** (backend `azurerm`, NIE Git — patrz niżej) — pozwala to na niezależne `apply`/`destroy` pojedynczego wariantu bez ryzyka dla pozostałych.
 
@@ -125,7 +135,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 
 ## Plan działania (fazy)
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
-- **Faza 1 — PRAWIE ZAMKNIĘTA**: moduły Terraform napisane, zrefaktoryzowane (base module + kompozycje), sformatowane (`fmt` czyste), zwalidowane (`terraform validate` OK na wszystkich 4 environments). Zostało: `scripts/` (init-db.sh, run-benchmark.sh, collect-results.sh) + pierwszy realny `terraform apply` na próbę.
+- **Faza 1 — PRAWIE ZAMKNIĘTA**: moduły Terraform napisane, zrefaktoryzowane (base module + kompozycje), sformatowane (`fmt` czyste), zwalidowane (`terraform validate` OK na wszystkich 4 environments). `bootstrap/` zaaplikowany (remote state istnieje). `scripts/*.sh` napisane i sprawdzone składniowo/logicznie (dry-run lokalny z podstawionymi `pgbench`/`psql`), ale **jeszcze bez realnego przebiegu end-to-end** — świadomie odłożone do momentu pierwszego `terraform apply` na środowisku. Zostało: pierwszy realny `terraform apply` na jednym środowisku + pierwszy prawdziwy przebieg `init-db.sh`/`run-benchmark.sh` jako potwierdzenie end-to-end.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - Faza 3: pilotaż (5×4 przebiegi) → wyliczenie N
 - Faza 4: właściwe pomiary (N×4, randomizacja)
