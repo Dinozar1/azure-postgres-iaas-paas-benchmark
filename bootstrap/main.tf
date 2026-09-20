@@ -19,7 +19,7 @@ provider "azurerm" {
 variable "location" {
   description = "Azure region for the resources."
   type        = string
-  default     = "polandcentral"
+  default     = "belgiumcentral"
 }
 
 variable "resource_group_name" {
@@ -40,18 +40,14 @@ variable "container_name" {
   default     = "tfstate"
 }
 
-locals {
-  common_tags = {
-    project = "thesis-iaas-paas-postgres"
-    purpose = "terraform-remote-state"
-  }
-}
-
 resource "azurerm_resource_group" "tfstate" {
   name     = var.resource_group_name
   location = var.location
 
-  tags = local.common_tags
+  tags = {
+    project = "thesis-iaas-paas-postgres"
+    purpose = "terraform-remote-state"
+  }
 }
 
 resource "azurerm_storage_account" "tfstate" {
@@ -65,7 +61,10 @@ resource "azurerm_storage_account" "tfstate" {
     versioning_enabled = true # safety net: this is the single copy of state, worth versioning
   }
 
-  tags = local.common_tags
+  tags = {
+    project = "thesis-iaas-paas-postgres"
+    purpose = "terraform-remote-state"
+  }
 }
 
 resource "azurerm_storage_container" "tfstate" {

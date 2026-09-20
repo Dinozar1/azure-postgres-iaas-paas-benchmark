@@ -1,5 +1,5 @@
 environment_name       = "iaas-premium-ssd"
-location                = "polandcentral"
+location                = "belgiumcentral"
 admin_source_ip         = "YOUR_PUBLIC_IP/32"
 ssh_public_key           = "ssh-ed25519 AAAA... your-key-comment"
 data_disk_type           = "Premium_LRS"

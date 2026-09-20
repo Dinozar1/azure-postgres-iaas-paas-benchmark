@@ -6,7 +6,7 @@ variable "environment_name" {
 variable "location" {
   description = "Azure region for all resources in this environment."
   type        = string
-  default     = "polandcentral"
+  default     = "belgiumcentral"
 }
 
 variable "admin_source_ip" {
@@ -28,7 +28,7 @@ variable "sku_name" {
   description = <<-EOT
     Compute SKU for the Flexible Server. This is the parameter under test
     for this environment. Verify exact names available in Poland Central
-    first: az postgres flexible-server list-skus --location polandcentral
+    first: az postgres flexible-server list-skus --location belgiumcentral
   EOT
   type        = string
 }

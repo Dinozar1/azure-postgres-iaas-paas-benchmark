@@ -1,5 +1,5 @@
 environment_name       = "paas-general-purpose"
-location                = "polandcentral"
+location                = "belgiumcentral"
 admin_source_ip         = "YOUR_PUBLIC_IP/32"
 ssh_public_key           = "ssh-ed25519 AAAA... your-key-comment"
 server_name               = "psql-thesis-pgbench-gp"

@@ -6,7 +6,7 @@ variable "environment_name" {
 variable "location" {
   description = "Azure region for all resources in this environment."
   type        = string
-  default     = "polandcentral"
+  default     = "belgiumcentral"
 }
 
 variable "admin_source_ip" {

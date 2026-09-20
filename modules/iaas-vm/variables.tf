@@ -19,9 +19,9 @@ variable "subnet_id" {
 }
 
 variable "vm_size" {
-  description = "Azure VM size."
+  description = "Azure VM size. Standard_B2s_v2, not the originally planned Standard_D2s_v5 — the Azure for Students subscription blocks Dsv5 (quota=0, non-increasable) and every other D-series size tested (NotAvailableForSubscription). B2s_v2 is the confirmed-available size with matching 2 vCPU / 8 GB spec and Premium Storage support. See CLAUDE.md for the full investigation."
   type        = string
-  default     = "Standard_D2s_v5"
+  default     = "Standard_B2s_v2"
 }
 
 variable "admin_username" {

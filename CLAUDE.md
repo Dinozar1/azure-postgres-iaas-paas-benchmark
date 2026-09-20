@@ -19,23 +19,41 @@ EN: Comparative analysis of performance, costs, and utilization of cloud resourc
 Terminologia w pracy ma być spójna z tym opisem (np. "efektywność finansowa", nie "kosztowa").
 
 ## Stos technologiczny
-- Chmura: Microsoft Azure, budżet $100 (grant uczelniany)
+- Chmura: Microsoft Azure, region **Belgium Central** (`belgiumcentral`), budżet $100 (grant uczelniany, subskrypcja Azure for Students)
 - Baza danych: PostgreSQL
 - IaC: Terraform
 - Benchmark: pgbench (wbudowany w PostgreSQL, workload domyślny tpcb-like)
 - Wymóg promotora: żadnych wniosków z pojedynczego pomiaru — wyniki wyłącznie jako średnia ± przedział ufności
 
+Region i rozmiar VM wymuszone przez realne ograniczenia subskrypcji studenckiej — pełna historia decyzji: patrz sekcja "Historia decyzji: region i rozmiar VM" niżej. W skrócie: `Poland Central` i VM `Standard_D2s_v5` (pierwotny plan) okazały się niedostępne dla tej subskrypcji; finalnie `belgiumcentral` + `Standard_B2s_v2`.
+
 ## Macierz eksperymentu (4 konfiguracje, jeden typ obciążenia)
-1. IaaS: VM `Standard_D2s_v5` (2 vCPU / 8 GB) + Standard SSD E10 (128 GB)
-2. IaaS: VM `Standard_D2s_v5` (2 vCPU / 8 GB) + Premium SSD P10 (128 GB)
-3. PaaS: PostgreSQL Flexible Server, tier Burstable B1ms
-4. PaaS: PostgreSQL Flexible Server, tier General Purpose D2s
+1. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Standard SSD E10 (128 GB)
+2. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Premium SSD P10 (128 GB)
+3. PaaS: PostgreSQL Flexible Server, tier Burstable (`B_Standard_B1ms`)
+4. PaaS: PostgreSQL Flexible Server, tier General Purpose (`GP_Standard_D2s_v3`)
 
 Uzasadnienie: warianty 1-2 pokazują wpływ warstwy dyskowej (rozdz. 2.4 pracy), warianty 3-4 pokazują kompromis tańszy/wolniejszy vs droższy/wydajniejszy w modelu zarządzanym.
 
+**Ograniczenie do opisania w Rozdziale 6:** `Standard_B2s_v2` ma model kredytowy CPU (throttling po wyczerpaniu kredytów baseline), inny niż `Standard_D2s_v5` (brak throttlingu, stały performance). Wpływa symetrycznie na oba warianty dyskowe (1 i 2), więc porównanie Standard SSD vs Premium SSD w ramach IaaS zostaje ważne — ale osłabia wprost porównanie IaaS vs PaaS (PaaS SKU nie mają tego typu throttlingu na tym poziomie), bo część różnicy w wynikach może pochodzić z modelu CPU, nie z samej architektury IaaS/PaaS. Do jawnego zaznaczenia jako threat to validity.
+
+**Ważne:** dokładne nazwy SKU dla Flexible Server bywają zależne od regionu — zawsze zweryfikuj przed `apply`:
+`az postgres flexible-server list-skus --location belgiumcentral`
+
 ## Architektura testowa
-- **Osobna mała VM-klient** (np. `Standard_B2s`) uruchamia pgbench — celowo odseparowana od serwera bazy, żeby nie zaburzać pomiaru CPU/RAM serwera (kluczowa metryka z USOS)
+- **Osobna mała VM-klient** (`Standard_B2s_v2`) uruchamia pgbench — celowo odseparowana od serwera bazy, żeby nie zaburzać pomiaru CPU/RAM serwera (kluczowa metryka z USOS)
 - Ta sama VM-klient używana dla wszystkich 4 konfiguracji
+
+## Historia decyzji: region i rozmiar VM
+
+Pierwotny plan (`polandcentral` + `Standard_D2s_v5`) okazał się niewykonalny na subskrypcji Azure for Students. Zdiagnozowane systematycznie (CLI: `az vm list-usage`, `az vm list-skus --all`, `az quota update`) na ~20 rozmiarach VM w ~6 regionach UE:
+
+1. **`Standard_D2s_v5` niedostępny.** Rodzina DSv5 (i wszystkie nowsze generacje: v6, v7) ma quota = 0 na tej subskrypcji, a samoobsługowe zwiększenie (`az quota update`) kończy się `ResourceNotAvailableForOffer` — kategoryczna odmowa, nie "spróbuj ponownie". Starsze generacje (`D2s_v3`, `D2s_v4`, `D2as_v4`) mają niezerową quotę (4 vCPU), ale sam rozmiar VM jest zablokowany dla subskrypcji (`NotAvailableForSubscription`) niezależnie od quoty. Jedyny sprawdzony rozmiar dostępny **i** z niezerową quotą: `Standard_B2s_v2` (2 vCPU / 8 GB, Premium Storage capable — spełnia oryginalną specyfikację).
+2. **`Poland Central` całkowicie zablokowany.** Azure Policy (`sys.regionrestriction`) na tej subskrypcji dopuszcza tylko 5 regionów: `belgiumcentral`, `francecentral`, `germanywestcentral`, `swedencentral`, `norwayeast` (ten ostatni dodatkowo access-restricted). Nie wykrywalne komendami informacyjnymi (`list-skus`/`list-usage`) — ujawnia się dopiero przy próbie realnego utworzenia zasobu.
+3. **`Germany West Central` też odpadł** — dwa niezależne błędy: chwilowy brak pojemności fizycznej dla `Standard_B2s_v2` (`SkuNotAvailable`) i osobno ograniczenie Flexible Server PaaS w tym regionie ("location is restricted from performing this operation", prawdopodobnie limit dla klientów spoza EA).
+4. **`Belgium Central` przeszedł testy realnym tworzeniem+kasowaniem zasobu** (VM `Standard_B2s_v2` i PaaS General Purpose) → finalny wybór.
+
+Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla subskrypcji promocyjnych/studenckich nie jest w pełni przewidywalna z dokumentacji ani z komend informacyjnych — wymaga systematycznej, empirycznej weryfikacji (realny apply/destroy), nie tylko sprawdzenia quoty.
 
 ## Parametry pgbench (ustalone)
 - Scale factor: **1000** (~15 GB bazy — celowo > 8 GB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache)
@@ -60,30 +78,38 @@ Nazwa repo: `azure-postgres-iaas-paas-benchmark`
 azure-postgres-iaas-paas-benchmark/
 ├── README.md
 ├── .gitignore                  # *.tfstate, *.tfvars z sekretami, .terraform/
+│                                # UWAGA: .terraform.lock.hcl NIE jest ignorowany —
+│                                # commitowany per-environment (reprodukowalność)
 ├── bootstrap/                  # jednorazowo: Storage Account pod remote state
 │   └── main.tf
 ├── modules/
-│   ├── network/                 # VNet, subnet, NSG — wspólne
-│   ├── iaas-vm/                 # VM + parametryzowany typ dysku
-│   ├── paas-postgres/           # Flexible Server + parametryzowany tier
-│   └── client-vm/               # mała VM do pgbencha
-├── environments/
+│   ├── network/                 # VNet, subnet, NSG — wspólne dla wszystkich wariantów
+│   ├── linux-vm/                 # BAZOWY moduł: public IP + NIC + VM (locals.common_tags)
+│   ├── iaas-vm/                   # komponuje linux-vm + dysk danych + cloud-init PostgreSQL
+│   ├── client-vm/                 # komponuje linux-vm + cloud-init pgbench/psql
+│   ├── paas-postgres/             # Flexible Server + parametryzowany tier
+│   ├── iaas-environment/          # KOMPOZYCJA: network + client-vm + iaas-vm → pełne środowisko IaaS
+│   └── paas-environment/          # KOMPOZYCJA: network + client-vm + paas-postgres → pełne środowisko PaaS
+├── environments/                 # każdy folder to CIENKI wrapper: terraform{}, provider{},
+│   │                              # jedno wywołanie modułu *-environment, backend.tf, tfvars
 │   ├── iaas-standard-ssd/
 │   ├── iaas-premium-ssd/
 │   ├── paas-burstable/
 │   └── paas-general-purpose/
-│       (każdy: main.tf wołający moduły + client-vm, variables.tf, terraform.tfvars, backend.tf)
-├── scripts/
-│   ├── init-db.sh               # pgbench -i -s 1000
-│   ├── run-benchmark.sh         # warm-up 2min + pomiar 12min + vacuum
-│   └── collect-results.sh
-└── .github/workflows/
-    └── run-benchmark.yml         # opcjonalnie: automatyzacja
+├── scripts/                      # NIEROZPOCZĘTE — init-db.sh, run-benchmark.sh, collect-results.sh
+│   │                              # (planowane: wspólny scripts/lib/common.sh z parametrami benchmarku)
+└── .github/workflows/             # opcjonalnie: terraform fmt -check + validate jako CI gate
 ```
 
-Ważne: **stan Terraforma (`.tfstate`) NIE trafia do Git** — backend `azurerm` (kontener w osobnym Storage Account), nie plik w repo. Każda z 4 konfiguracji w `environments/` ma własny, izolowany stan (łatwiej odpalić `destroy` na jednym wariancie bez ryzyka dla pozostałych).
+Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** (backend `azurerm`, NIE Git — patrz niżej) — pozwala to na niezależne `apply`/`destroy` pojedynczego wariantu bez ryzyka dla pozostałych.
 
-Storage Account pod remote state: `sttfstatepgbench01` (nazwa robocza, do sprawdzenia dostępności — musi być globalnie unikalna w Azure).
+### Konwencje techniczne (ustalone podczas refaktoryzacji)
+- **Tagowanie:** `locals { common_tags = { project = "thesis-iaas-paas-postgres", environment = var.environment_name } }` w modułach, gdzie ten sam blok tagów powtarzał się 2+ razy w pliku (`linux-vm`, `network`, `bootstrap`). Tam gdzie tagi występują raz — zostają inline.
+- **Kompozycja modułów:** `linux-vm` to wspólny budulec dla `iaas-vm` i `client-vm` (unika duplikacji public IP + NIC + VM). `iaas-environment`/`paas-environment` to moduły spinające całe środowisko — dzięki temu pary `environments/iaas-*` i `environments/paas-*` (wcześniej bajtowo identyczne poza jedną zmienną) są teraz kilkunastolinijkowymi wrapperami.
+- **Znana granica Terraforma (do wzmianki w pracy, nie do naprawy w kodzie):** blok `terraform{}`/`provider{}` musi być zadeklarowany w każdym root module osobno (bootstrap + 4 environments = 5×) — to ograniczenie narzędzia, nie przeoczenie. To samo dotyczy `backend "azurerm" {}` (nie przyjmuje zmiennych, różni się tylko `key`).
+- **Formatowanie:** `terraform fmt -recursive` odpalane po większych zmianach, `terraform fmt -check -recursive` powinno zawsze wychodzić czysto.
+
+Storage Account pod remote state: `sttfstatepgbench01` (do potwierdzenia dostępności — nazwa musi być globalnie unikalna w Azure).
 
 ## Struktura pracy (LaTeX, Overleaf)
 `main.tex` → `\input{chapters/...}`:
@@ -98,8 +124,8 @@ Storage Account pod remote state: `sttfstatepgbench01` (nazwa robocza, do sprawd
 Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 planu), rozdział 2 równolegle z Fazą 1 (nie zależy od infry).
 
 ## Plan działania (fazy)
-- **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu (ten dokument to jej wynik)
-- **Faza 1 — W TRAKCIE**: budowa modułów Terraform (bootstrap, network, iaas-vm, paas-postgres, client-vm, environments)
+- **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
+- **Faza 1 — PRAWIE ZAMKNIĘTA**: moduły Terraform napisane, zrefaktoryzowane (base module + kompozycje), sformatowane (`fmt` czyste), zwalidowane (`terraform validate` OK na wszystkich 4 environments). Zostało: `scripts/` (init-db.sh, run-benchmark.sh, collect-results.sh) + pierwszy realny `terraform apply` na próbę.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - Faza 3: pilotaż (5×4 przebiegi) → wyliczenie N
 - Faza 4: właściwe pomiary (N×4, randomizacja)
@@ -110,3 +136,4 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 ## Zasady pracy
 - Przy modyfikacji plików zawsze podawaj pełną, gotową do wklejenia zawartość pliku (nie tylko diff/fragment).
 - Terraform ma być zrobiony porządnie: remote state, moduły parametryzowane, automatyczne `destroy` po teście — to element odróżniający pracę "zbliżoną do naukowej" od zwykłego postawienia serwera.
+- README i komentarze w kodzie repo — po angielsku. Sama praca (LaTeX) — po polsku.

@@ -19,9 +19,9 @@ variable "subnet_id" {
 }
 
 variable "vm_size" {
-  description = "Azure VM size for the pgbench client. Kept small and cheap — this machine only runs the benchmark tool, never PostgreSQL itself."
+  description = "Azure VM size for the pgbench client. Standard_B2s_v2 — confirmed available on this Azure for Students subscription (see modules/iaas-vm for the full investigation); kept identical to the database VM size for consistency, though this VM's own power matters less since it only runs pgbench."
   type        = string
-  default     = "Standard_B2s"
+  default     = "Standard_B2s_v2"
 }
 
 variable "admin_username" {
