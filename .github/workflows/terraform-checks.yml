@@ -1,0 +1,51 @@
+name: terraform-checks
+
+# Lightweight quality gate: formatting, validation, shell syntax.
+#
+# Deliberately credential-free: `terraform init -backend=false` skips the
+# azurerm backend, so no Azure service principal is needed and nothing is ever
+# deployed or destroyed from CI.
+#
+# Benchmarks are intentionally NOT run here. pgbench executes on the client VM
+# in Azure, reached over SSH from a single admin IP allowed by the NSG, while
+# GitHub-hosted runners use large rotating address ranges. Running the
+# measurements from CI would mean opening SSH far wider without making any
+# measurement more rigorous — orchestration stays local (see scripts/).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate (every root module)
+        run: |
+          for dir in bootstrap environments/*/; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+      - name: shell syntax
+        run: |
+          for f in scripts/lib/common.sh scripts/*.sh; do
+            echo "-- $f"
+            bash -n "$f"
+          done
