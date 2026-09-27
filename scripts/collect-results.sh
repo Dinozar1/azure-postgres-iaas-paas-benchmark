@@ -42,6 +42,12 @@ for meta in "$RESULTS_DIR"/*/meta.env; do
   fi
 done
 
+if [ -z "$METRIC_COLUMNS" ]; then
+  echo "NOTE: no run under $RESULTS_DIR recorded a metrics resource id, so the" >&2
+  echo "      CSV carries pgbench columns only. Runs made before metric" >&2
+  echo "      collection existed, or after terraform destroy, look like this." >&2
+fi
+
 CSV="$RESULTS_DIR/summary.csv"
 {
   printf 'run_id,tps,latency_avg_ms'
