@@ -2,8 +2,11 @@
 package_update: true
 package_upgrade: true
 
+# Pinned major version rather than the unversioned metapackage, so the client's
+# pgbench always matches the server major version under test (16 for both the
+# IaaS VM and the PaaS Flexible Server). pgbench ships in this package.
 packages:
-  - postgresql-contrib
+  - postgresql-16
 
 runcmd:
   # This machine only runs pgbench/psql against remote servers — the local

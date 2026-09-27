@@ -53,10 +53,14 @@ resource "azurerm_linux_virtual_machine" "this" {
     storage_account_type = var.os_disk_type
   }
 
+  # Ubuntu 24.04 (noble), not 22.04: noble ships PostgreSQL 16 in its own
+  # repositories, matching the version the PaaS Flexible Server runs. On 22.04
+  # (PostgreSQL 14) the IaaS arm would either need the external PGDG repo at
+  # boot or run a different major version than the PaaS arm.
   source_image_reference {
     publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
     version   = "latest"
   }
 

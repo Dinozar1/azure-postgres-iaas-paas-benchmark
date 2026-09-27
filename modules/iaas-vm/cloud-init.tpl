@@ -2,9 +2,12 @@
 package_update: true
 package_upgrade: true
 
+# No postgresql-contrib-NN: since PostgreSQL 11 the contrib modules (and
+# pgbench) ship inside the versioned server package, and Ubuntu publishes no
+# such package — asking for it makes cloud-init report failure even though
+# everything else provisions correctly.
 packages:
   - postgresql-${postgresql_version}
-  - postgresql-contrib-${postgresql_version}
 
 write_files:
   - path: /opt/provision/format-mount-disk.sh
@@ -29,7 +32,7 @@ runcmd:
   - mkdir -p /mnt/pgdata/${postgresql_version}
   - chown postgres:postgres /mnt/pgdata/${postgresql_version}
   - pg_createcluster ${postgresql_version} main --datadir=/mnt/pgdata/${postgresql_version}/main -- --auth-local=peer --auth-host=md5
-  - sed -i "s/^#listen_addresses.*/listen_addresses = '*'/" /etc/postgresql/${postgresql_version}/main/postgresql.conf
+  - pg_conftool ${postgresql_version} main set listen_addresses '*'
   - echo "host all all ${allowed_client_address_space} md5" >> /etc/postgresql/${postgresql_version}/main/pg_hba.conf
   - systemctl restart postgresql
   - sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${postgres_admin_password}';"

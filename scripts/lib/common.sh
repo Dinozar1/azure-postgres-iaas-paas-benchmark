@@ -10,9 +10,14 @@ PGBENCH_JOBS=2
 PROGRESS_INTERVAL=60
 DB_PORT=5432
 
-SSH_KEY="$HOME/.ssh/id_ed25519_pgbench"
+# RSA, not ed25519: the azurerm 3.x provider rejects ed25519 in admin_ssh_key.
+SSH_KEY="$HOME/.ssh/id_rsa_pgbench"
 SSH_USER="azureuser"
-SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+# ServerAlive* keeps long, quiet operations alive: pgbench -i at scale 1000
+# prints nothing for tens of minutes, long enough for a NAT/firewall idle
+# timeout to drop the session and kill the run.
+SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RESULTS_ROOT="$REPO_ROOT/results"
