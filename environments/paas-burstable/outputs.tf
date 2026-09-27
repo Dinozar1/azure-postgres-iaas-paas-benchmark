@@ -13,3 +13,7 @@ output "db_name" {
 output "client_vm_public_ip" {
   value = module.environment.client_vm_public_ip
 }
+
+output "metrics_resource_id" {
+  value = module.environment.metrics_resource_id
+}

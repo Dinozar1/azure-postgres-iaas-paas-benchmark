@@ -30,9 +30,14 @@ variable "sku_name" {
 }
 
 variable "storage_mb" {
-  description = "Provisioned storage in MB. Defaults to 131072 (128 GB) to match the IaaS data disk size for a fair comparison."
+  description = <<-EOT
+    Provisioned storage in MB. 524288 (512 GiB) to match the IaaS data disk
+    size, keeping capacity a controlled variable across the IaaS and PaaS arms.
+    Follow modules/iaas-vm's data_disk_size_gb if that changes — the two exist
+    to stay equal, and that variable documents why 512 GB was chosen.
+  EOT
   type        = number
-  default     = 131072
+  default     = 524288
 }
 
 variable "postgresql_version" {

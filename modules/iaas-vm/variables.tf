@@ -42,14 +42,32 @@ variable "os_disk_type" {
 }
 
 variable "data_disk_type" {
-  description = "Storage type for the PostgreSQL data disk: \"StandardSSD_LRS\" (E10) or \"Premium_LRS\" (P10). This is the parameter under test."
+  description = "Storage type for the PostgreSQL data disk: \"StandardSSD_LRS\" (E20 at the default size) or \"Premium_LRS\" (P20). This is the parameter under test."
   type        = string
 }
 
 variable "data_disk_size_gb" {
-  description = "Size of the PostgreSQL data disk in GB."
+  description = <<-EOT
+    Size of the PostgreSQL data disk in GB. Must stay identical across both IaaS
+    variants — only data_disk_type differs, so size is a controlled variable.
+
+    512 GB, not 128 GB: Azure provisions IOPS by size tier, and at 128 GB both
+    tiers land on the same 500 IOPS (E10 and P10 are indistinguishable in
+    provisioned throughput), which would leave the disk-layer comparison with
+    nothing to measure. Measured on this subscription:
+
+      size    StandardSSD    Premium      ratio
+      128 GB  500 / 100MBps  500 / 100    1.0x
+      256 GB  500 / 100MBps  1100 / 125   2.2x
+      512 GB  500 / 100MBps  2300 / 150   4.6x
+      1024 GB 500 / 100MBps  5000 / 200   (over the VM cap)
+
+    512 GB is the largest size whose Premium tier (2300 IOPS) still fits under
+    the Standard_B2s_v2 uncached ceiling of 3750 IOPS, so the VM never masks the
+    disk difference. At 1024 GB the VM, not the disk, would become the limit.
+  EOT
   type        = number
-  default     = 128
+  default     = 512
 }
 
 variable "data_disk_caching" {

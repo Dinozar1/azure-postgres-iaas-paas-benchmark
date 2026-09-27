@@ -106,3 +106,147 @@ client_vm_scp_from() {
   client_ip="$(tf_output "$env_dir" client_vm_public_ip)"
   scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -q -r "${SSH_USER}@${client_ip}:${remote_path}" "$local_path"
 }
+
+# --- Azure Monitor: confounding-factor metrics -------------------------------
+#
+# Every SKU in the experiment matrix meters something on a credit balance, so a
+# run's throughput depends on state accumulated before it started:
+#   - the data disk bursts on IO/BPS credits (full pool at creation, drains
+#     under sustained load, refills while idle) — measured at 0 -> 9 -> 17%
+#     consumed during the very first trial run, so this is real, not theoretical
+#   - Standard_B2s_v2 meters CPU on credits as well, though the first trial run
+#     showed the database VM at ~10% CPU with credits accruing, so for this
+#     I/O-bound workload CPU is not the binding constraint
+#   - the Flexible Server Burstable tier meters CPU the same way
+#
+# These are collected per run so the analysis can show whether a given
+# measurement was taken in a bursting or a steady state, rather than assuming.
+
+# CSV column -> "metric name|aggregation". Aggregation picks the summary that
+# matters for that quantity: worst-case remaining credit (Minimum), peak credit
+# consumption (Maximum), typical load (Average).
+IAAS_METRIC_SPEC=(
+  "cpu_pct_avg|Percentage CPU|average"
+  "cpu_pct_max|Percentage CPU|maximum"
+  "cpu_credits_remaining_min|CPU Credits Remaining|minimum"
+  "disk_burst_io_pct_max|Data Disk Used Burst IO Credits Percentage|maximum"
+  "disk_burst_bps_pct_max|Data Disk Used Burst BPS Credits Percentage|maximum"
+)
+
+# Flexible Server publishes a different, lowercase metric set. These names are
+# the intended ones but have NOT yet been verified against a live server (no
+# PaaS environment has been deployed at the time of writing) — fetch_metrics
+# intersects this list with what the resource actually reports and warns about
+# whatever is missing, so an unverified name degrades to an empty column rather
+# than failing the run. Confirm with:
+#   az monitor metrics list-definitions --resource <server-id> -o table
+PAAS_METRIC_SPEC=(
+  "cpu_pct_avg|cpu_percent|average"
+  "cpu_pct_max|cpu_percent|maximum"
+  "cpu_credits_remaining_min|cpu_credits_remaining|minimum"
+  "memory_pct_max|memory_percent|maximum"
+  "iops_avg|iops|average"
+  "storage_pct_max|storage_percent|maximum"
+)
+
+# Echoes the metric spec lines appropriate for a resource id.
+metric_spec_for() {
+  local resource_id="$1"
+  case "$resource_id" in
+  *"/providers/Microsoft.DBforPostgreSQL/flexibleServers/"*)
+    printf '%s\n' "${PAAS_METRIC_SPEC[@]}"
+    ;;
+  *"/providers/Microsoft.Compute/virtualMachines/"*)
+    printf '%s\n' "${IAAS_METRIC_SPEC[@]}"
+    ;;
+  *)
+    echo "Unrecognised resource type for metrics: $resource_id" >&2
+    return 1
+    ;;
+  esac
+}
+
+# fetch_metrics <resource_id> <start_iso> <end_iso>
+#
+# Prints "column=value" lines for the metrics defined for that resource type,
+# reduced over the window. Columns whose metric the resource does not publish,
+# or which returned no data points, are printed empty. Never fails the caller:
+# a missing metric must not cost a completed 12-minute measurement.
+fetch_metrics() {
+  local resource_id="$1" start_iso="$2" end_iso="$3"
+  local spec available names=() seen=()
+
+  spec="$(metric_spec_for "$resource_id")" || return 0
+
+  available="$(az monitor metrics list-definitions --resource "$resource_id" \
+    --query "[].name.value" -o tsv 2>/dev/null || true)"
+  if [ -z "$available" ]; then
+    echo "WARNING: no metric definitions readable for $resource_id (deleted resource?)" >&2
+    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    return 0
+  fi
+
+  # Unique metric names that the resource actually publishes.
+  while IFS='|' read -r col metric _; do
+    [ -n "$metric" ] || continue
+    if ! grep -qxF "$metric" <<<"$available"; then
+      echo "WARNING: metric '$metric' not published by this resource, column '$col' left empty" >&2
+      continue
+    fi
+    if [[ ! " ${seen[*]-} " == *" $metric "* ]]; then
+      seen+=("$metric")
+      names+=("$metric")
+    fi
+  done <<<"$spec"
+
+  if [ ${#names[@]} -eq 0 ]; then
+    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    return 0
+  fi
+
+  local json
+  json="$(az monitor metrics list --resource "$resource_id" \
+    --metric "${names[@]}" \
+    --start-time "$start_iso" --end-time "$end_iso" \
+    --interval PT1M --aggregation Average Maximum Minimum \
+    -o json 2>/dev/null || true)"
+
+  if [ -z "$json" ]; then
+    echo "WARNING: metric query failed for $resource_id" >&2
+    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    return 0
+  fi
+
+  SPEC="$spec" python3 -c '
+import json, os, sys
+
+spec = [l.split("|") for l in os.environ["SPEC"].splitlines() if l.strip()]
+data = json.load(sys.stdin)
+
+series = {}
+for m in data.get("value", []):
+    name = m["name"]["value"]
+    pts = []
+    for ts in m.get("timeseries", []):
+        pts.extend(ts.get("data", []))
+    series[name] = pts
+
+def reduce(name, how):
+    vals = [p[how] for p in series.get(name, []) if p.get(how) is not None]
+    if not vals:
+        return ""
+    if how == "maximum":
+        return f"{max(vals):.2f}"
+    if how == "minimum":
+        return f"{min(vals):.2f}"
+    return f"{sum(vals)/len(vals):.2f}"
+
+for col, name, how in spec:
+    print(f"{col}={reduce(name, how)}")
+' <<<"$json"
+}
+
+# Column order for the aggregated CSV, per resource type.
+metric_columns_for() {
+  metric_spec_for "$1" | cut -d'|' -f1
+}

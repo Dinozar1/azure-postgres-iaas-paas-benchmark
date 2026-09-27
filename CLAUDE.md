@@ -28,14 +28,45 @@ Terminologia w pracy ma być spójna z tym opisem (np. "efektywność finansowa"
 Region i rozmiar VM wymuszone przez realne ograniczenia subskrypcji studenckiej — pełna historia decyzji: patrz sekcja "Historia decyzji: region i rozmiar VM" niżej. W skrócie: `Poland Central` i VM `Standard_D2s_v5` (pierwotny plan) okazały się niedostępne dla tej subskrypcji; finalnie `belgiumcentral` + `Standard_B2s_v2`.
 
 ## Macierz eksperymentu (4 konfiguracje, jeden typ obciążenia)
-1. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Standard SSD E10 (128 GB)
-2. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Premium SSD P10 (128 GB)
-3. PaaS: PostgreSQL Flexible Server, tier Burstable (`B_Standard_B1ms`)
-4. PaaS: PostgreSQL Flexible Server, tier General Purpose (`GP_Standard_D2s_v3`)
+1. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Standard SSD E20 (512 GB)
+2. IaaS: VM `Standard_B2s_v2` (2 vCPU / 8 GB) + Premium SSD P20 (512 GB)
+3. PaaS: PostgreSQL Flexible Server, tier Burstable (`B_Standard_B1ms`), 512 GiB storage
+4. PaaS: PostgreSQL Flexible Server, tier General Purpose (`GP_Standard_D2s_v3`), 512 GiB storage
 
 Uzasadnienie: warianty 1-2 pokazują wpływ warstwy dyskowej (rozdz. 2.4 pracy), warianty 3-4 pokazują kompromis tańszy/wolniejszy vs droższy/wydajniejszy w modelu zarządzanym.
 
-**Ograniczenie do opisania w Rozdziale 6:** `Standard_B2s_v2` ma model kredytowy CPU (throttling po wyczerpaniu kredytów baseline), inny niż `Standard_D2s_v5` (brak throttlingu, stały performance). Wpływa symetrycznie na oba warianty dyskowe (1 i 2), więc porównanie Standard SSD vs Premium SSD w ramach IaaS zostaje ważne — ale osłabia wprost porównanie IaaS vs PaaS (PaaS SKU nie mają tego typu throttlingu na tym poziomie), bo część różnicy w wynikach może pochodzić z modelu CPU, nie z samej architektury IaaS/PaaS. Do jawnego zaznaczenia jako threat to validity.
+Rozmiar dysku 512 GB nie jest arbitralny — patrz sekcja "Decyzja: rozmiar dysku 512 GB" niżej. Przy pierwotnie planowanych 128 GB oba tiery mają identyczne 500 IOPS i porównanie warstwy dyskowej nie miałoby czego mierzyć.
+
+## Decyzja: rozmiar dysku 512 GB
+
+Azure provisionuje IOPS według progu pojemności, nie według samego tieru. Zmierzone **empirycznie na tej subskrypcji** (`az disk create` + `az disk show`, region `belgiumcentral`):
+
+| Rozmiar | Standard SSD | Premium SSD | Stosunek IOPS |
+|---|---|---|---|
+| 128 GB (E10/P10) | 500 IOPS, 100 MB/s | 500 IOPS, 100 MB/s | **1,0× — identyczne** |
+| 256 GB (E15/P15) | 500 IOPS, 100 MB/s | 1100 IOPS, 125 MB/s | 2,2× |
+| **512 GB (E20/P20)** | **500 IOPS, 100 MB/s** | **2300 IOPS, 150 MB/s** | **4,6×** |
+| 1024 GB (E30/P30) | 500 IOPS, 100 MB/s | 5000 IOPS, 200 MB/s | powyżej limitu VM |
+
+Limity samej VM `Standard_B2s_v2` (`az vm list-skus`): **3750 IOPS / 85 MB/s** dla dysków bez cache (a dysk danych ma świadomie `caching = "None"`, żeby pomiar odzwierciedlał tier dysku, nie warstwę cache hosta).
+
+Stąd wybór 512 GB:
+- **Największy rozmiar, przy którym Premium (2300 IOPS) nie dobija do sufitu VM (3750 IOPS)** — maszyna nie maskuje różnicy między tierami. Przy 1024 GB wąskim gardłem byłaby VM (5000 > 3750), nie dysk, i porównanie straciłoby sens.
+- Przy 128 GB różnica wynosiłaby 1,0× — nie byłoby czego mierzyć.
+- **Uwaga dla rozdz. 5:** przy MB/s wąskim gardłem jest VM (85 MB/s), nie dysk (100–150 MB/s), więc *przepustowość sekwencyjna* wyjdzie podobna w obu wariantach. Różnica ujawni się w **IOPS i latencji** — czyli dokładnie w metrykach, które wymienia opis z USOS. Workload `tpcb-like` jest losowy i drobnotransakcyjny, więc IOPS jest tu metryką wiodącą.
+- Rozmiar dysku jest **zmienną kontrolowaną**: identyczny w wariantach 1 i 2, różni się tylko tier. Parytet po stronie PaaS: `storage_mb = 524288` (512 GiB) w `modules/paas-postgres`.
+- Koszt: dyski są rozliczane od pojemności provisionowanej, nie użytej, ale przy środowiskach efemerycznych to ~$0,05–0,10/h za dysk — kilka dolarów w skali całej kampanii pomiarowej.
+
+## Bursting jako czynnik zakłócający (threat to validity, rozdz. 6)
+
+Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu zależy od stanu **sprzed** jego rozpoczęcia. Zmierzone w pierwszym przebiegu testowym (Azure Monitor, VM bazy):
+
+- **Kredyty burst dysku: realny problem.** `Data Disk Used Burst IO Credits Percentage` rosło 0% → 9% → 17% w trakcie 12-minutowego pomiaru. Dysk startuje z pełną pulą kredytów, zużywa je pod obciążeniem i odbudowuje w bezczynności — więc pierwszy przebieg po utworzeniu środowiska mierzy dysk *burstujący*, a nie stan ustalony danego tieru. **Dlatego `run-benchmark.sh --burn-in`**: jeden pełny przebieg nieliczony do wyników, który drenuje pulę przed właściwymi pomiarami. Konsekwencja dla Fazy 4: *odstęp między przebiegami wpływa na stan kredytów*, więc trzeba go raportować.
+- **Kredyty CPU: dużo mniej istotne, niż zakładano.** `Percentage CPU` na VM bazy wynosiło **~9–10%**, a `CPU Credits Remaining` **rosło** (76 → 79) w trakcie pomiaru. Obciążenie jest I/O-bound, więc model kredytowy CPU `B2s_v2` praktycznie nie działa jako ograniczenie — to koryguje wcześniejsze założenie, że throttling CPU będzie głównym zagrożeniem trafności przy zamianie `D2s_v5` → `B2s_v2`. Nadal warto to raportować, ale jako zweryfikowane i odrzucone, nie jako domniemane.
+- **VM-klient nie jest wąskim gardłem:** CPU ~3%, co potwierdza sens odseparowanej maszyny klienckiej.
+- Tier Burstable Flexible Servera (wariant 3) mierzy CPU na kredytach analogicznie — do sprawdzenia przy pierwszym wdrożeniu PaaS.
+
+`collect-results.sh` pobiera te metryki z Azure Monitor dla **okna czasowego samego pomiaru** (bez warm-upu i vacuum) i zapisuje obok wyników pgbench, żeby analiza mogła pokazać, czy dany przebieg był w stanie burstującym czy ustalonym. **Musi być uruchomiony przed `terraform destroy`** — Azure nie udostępnia metryk usuniętego zasobu.
 
 **Ważne:** dokładne nazwy SKU dla Flexible Server bywają zależne od regionu — zawsze zweryfikuj przed `apply`:
 `az postgres flexible-server list-skus --location belgiumcentral`
