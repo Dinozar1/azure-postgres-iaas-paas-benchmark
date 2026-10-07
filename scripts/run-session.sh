@@ -124,7 +124,11 @@ wait_for_cloud_init() {
     }
     sleep 10
   done
-  status="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "cloud-init status --wait --long" 2>/dev/null || true)"
+  # --wait prints progress dots on the line it later ends with the status, so
+  # the wait and the status read are two commands: the second prints clean
+  # lines. stderr stays in, so a failure explains itself in the session log.
+  status="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+    "cloud-init status --wait >/dev/null; cloud-init status --long" 2>&1 || true)"
   if ! grep -q '^status: done' <<<"$status"; then
     echo "ERROR: cloud-init on $label ($ip) did not finish cleanly:" >&2
     echo "$status" >&2
