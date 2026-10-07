@@ -196,7 +196,7 @@ IAAS_METRIC_SPEC=(
   "disk_write_iops_avg|Data Disk Write Operations/Sec|average"
   "disk_write_iops_max|Data Disk Write Operations/Sec|maximum"
   "disk_queue_depth_avg|Data Disk Queue Depth|average"
-  "disk_latency_ms_avg|Data Disk Latency|average|optional"
+  "disk_latency_ms_avg|Data Disk Latency|average"
   "disk_iops_consumed_pct_avg|Data Disk IOPS Consumed Percentage|average"
   "disk_iops_consumed_pct_max|Data Disk IOPS Consumed Percentage|maximum"
   "vm_uncached_iops_consumed_pct_max|VM Uncached IOPS Consumed Percentage|maximum"
@@ -205,8 +205,8 @@ IAAS_METRIC_SPEC=(
   "disk_burst_bps_pct_max|Data Disk Used Burst BPS Credits Percentage|maximum"
 )
 # Names verified against a live Standard_B2s_v2 VM's metric definitions on
-# 2026-10-07 (all support PT1M). disk_latency_ms_avg stays optional until a
-# real IaaS run confirms Azure actually fills it for an uncached data disk.
+# 2026-10-07 (all support PT1M); the iaas-premium-ssd sanity check the same
+# day confirmed Azure fills every one of them for the uncached data disk.
 # disk_burst_io_pct_min is the pool state at the start of the window (the used
 # share only grows under load), disk_burst_io_pct_max the state at its end.
 
