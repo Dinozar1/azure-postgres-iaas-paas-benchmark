@@ -204,16 +204,20 @@ IAAS_METRIC_SPEC=(
   "disk_burst_io_pct_max|Data Disk Used Burst IO Credits Percentage|maximum"
   "disk_burst_bps_pct_max|Data Disk Used Burst BPS Credits Percentage|maximum"
 )
+# Names verified against a live Standard_B2s_v2 VM's metric definitions on
+# 2026-10-07 (all support PT1M). disk_latency_ms_avg stays optional until a
+# real IaaS run confirms Azure actually fills it for an uncached data disk.
 # disk_burst_io_pct_min is the pool state at the start of the window (the used
 # share only grows under load), disk_burst_io_pct_max the state at its end.
 
-# Flexible Server publishes its own, lowercase metric set. These names are
-# the intended ones but have NOT yet been verified against a live server (no
-# PaaS environment has been deployed at the time of writing) — fetch_metrics
-# intersects this list with what the resource actually reports and warns about
-# whatever is missing, so an unverified name degrades to an empty column rather
-# than failing the run. Confirm with:
-#   az monitor metrics list-definitions --resource <server-id> -o table
+# Flexible Server publishes its own, lowercase metric set. Every name below was
+# verified against a live GP_Standard_D2s_v3 server in belgiumcentral on
+# 2026-10-07 (az monitor metrics list-definitions; all support PT1M). Two gaps
+# against the VM set: no disk latency metric — on PaaS, I/O latency comes only
+# from pg_stat_io with track_io_timing — and no storage burst-credit metric.
+# cpu_credits_remaining is published on every tier but only Burstable fills it.
+# fetch_metrics still intersects the list with what the resource reports, so a
+# name Azure ever drops degrades to an empty column instead of failing a run.
 PAAS_METRIC_SPEC=(
   "cpu_pct_avg|cpu_percent|average"
   "cpu_pct_max|cpu_percent|maximum"
@@ -230,10 +234,27 @@ PAAS_METRIC_SPEC=(
   "storage_pct_max|storage_percent|maximum"
 )
 
-# Credit balances printed right after a burn-in, to show the pool really is
-# drained before the measured runs start.
-IAAS_BURN_IN_METRICS=("Data Disk Used Burst IO Credits Percentage")
-PAAS_BURN_IN_METRICS=("cpu_credits_remaining")
+# Printed per minute after a burn-in, to show whether the burst-credit pool is
+# really drained before the measured runs start. On IaaS the data disk's
+# credit metric shows it directly, with IOPS alongside. Flexible Server
+# publishes no storage credit metric (and cpu_credits_remaining only fills on
+# Burstable), so there the evidence is IOPS against the provisioned baseline
+# (2300 at 512 GiB): IOPS above the baseline that later fall back to it mean
+# the pool emptied; IOPS that never reach it mean the disk is not the
+# bottleneck and bursting does not affect that configuration.
+IAAS_BURN_IN_METRICS=(
+  "Data Disk Used Burst IO Credits Percentage"
+  "Data Disk Read Operations/Sec"
+  "Data Disk Write Operations/Sec"
+  "Data Disk IOPS Consumed Percentage"
+)
+PAAS_BURN_IN_METRICS=(
+  "cpu_credits_remaining"
+  "iops"
+  "read_iops"
+  "write_iops"
+  "disk_iops_consumed_percentage"
+)
 
 # Prints "iaas" or "paas" for a metrics resource id.
 resource_kind() {
@@ -279,6 +300,69 @@ metric_required_columns_for() {
 published_metrics() {
   az monitor metrics list-definitions --resource "$1" \
     --query "[].name.value" -o tsv 2>/dev/null || true
+}
+
+# report_burn_in <resource_id> <start_iso> [end_iso]
+#
+# Prints a per-minute table (Azure Monitor averages) of the burn-in metrics the
+# resource publishes over the window — up to now by default — plus a
+# read+write IOPS column. Run it only once ingestion has caught up with the end
+# of the window (METRIC_INGESTION_LAG_SECONDS). Never fails: the burn-in itself
+# has already done its job.
+report_burn_in() {
+  local rid="$1" start="$2" end="${3:-}" available m metrics=() json
+  [ -n "$end" ] || end="$(now_iso)"
+  available="$(published_metrics "$rid")"
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    if grep -qxF "$m" <<<"$available"; then
+      metrics+=("$m")
+    else
+      echo "NOTE: '$m' is not published by this resource, not reported" >&2
+    fi
+  done < <(burn_in_metrics_for "$rid" || true)
+  if [ ${#metrics[@]} -eq 0 ]; then
+    echo "NOTE: no burn-in metric to report for $rid"
+    return 0
+  fi
+
+  json="$(az monitor metrics list --resource "$rid" --metric "${metrics[@]}" \
+    --start-time "$start" --end-time "$end" \
+    --interval PT1M --aggregation Average -o json 2>/dev/null || true)"
+  if [ -z "$json" ]; then
+    echo "WARNING: burn-in metric query failed for $rid" >&2
+    return 0
+  fi
+  python3 -c '
+import json, sys
+
+cols, rows = [], {}
+for m in json.load(sys.stdin).get("value", []):
+    name = m["name"]["value"]
+    cols.append(name)
+    for ts in m.get("timeseries", []):
+        for p in ts.get("data", []):
+            if p.get("average") is not None:
+                rows.setdefault(p["timeStamp"], {})[name] = p["average"]
+
+pairs = [("read_iops", "write_iops"),
+         ("Data Disk Read Operations/Sec", "Data Disk Write Operations/Sec")]
+sums = [(r, w) for r, w in pairs if r in cols and w in cols]
+headers = cols + ["read + write IOPS"] * len(sums)
+
+print("Per-minute averages (Azure Monitor):")
+for i, h in enumerate(headers, 1):
+    print("  [%d] %s" % (i, h))
+print("%-17s" % "time (UTC)" + "".join("%10s" % ("[%d]" % i) for i in range(1, len(headers) + 1)))
+for t in sorted(rows):
+    r = rows[t]
+    vals = [r.get(c) for c in cols]
+    vals += [r[a] + r[b] if a in r and b in r else None for a, b in sums]
+    print("%-17s" % t.replace("T", " ")[:16]
+          + "".join("%10.1f" % v if v is not None else "%10s" % "-" for v in vals))
+if not rows:
+    print("  no data points yet")
+' <<<"$json"
 }
 
 # fetch_metrics <resource_id> <start_iso> <end_iso> [raw_json_out]

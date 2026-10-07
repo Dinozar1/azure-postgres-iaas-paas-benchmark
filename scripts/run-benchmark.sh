@@ -9,8 +9,8 @@
 #
 # --burn-in replaces that sequence with one continuous pgbench of
 # BURN_IN_SECONDS (35 min) — no warm-up, no per-transaction log, no reset —
-# then waits out the Azure Monitor ingestion lag and prints the credit balance
-# it was meant to drain. Run it once after init-db.sh: a freshly created disk
+# then waits out the Azure Monitor ingestion lag and prints, per minute, the
+# credit balance it was meant to drain and the disk IOPS (burnin-metrics.txt). Run it once after init-db.sh: a freshly created disk
 # starts with a full burst-credit pool, so the first sustained load measures a
 # bursting disk rather than the steady state the disk tier actually provides,
 # and a single standard run is too short to empty that pool. collect-results.sh
@@ -159,52 +159,13 @@ PREV_RUN_END=$PREV_RUN_END
 IDLE_GAP_S=$IDLE_GAP_S
 META
 
-# Prints the credit balance(s) over the burn-in, once Azure Monitor has caught
-# up with its last minutes, to show the pool really is drained. Never fails:
-# the burn-in itself has already done its job.
-report_burn_in_credits() {
-  local rid="$1" since="$2" available m metrics=() json
-  available="$(published_metrics "$rid")"
-  while IFS= read -r m; do
-    [ -n "$m" ] || continue
-    if grep -qxF "$m" <<<"$available"; then
-      metrics+=("$m")
-    else
-      echo "NOTE: '$m' is not published by this resource, not reported" >&2
-    fi
-  done < <(burn_in_metrics_for "$rid" || true)
-  if [ ${#metrics[@]} -eq 0 ]; then
-    echo "NOTE: no credit metric to report for $rid"
-    return 0
-  fi
-
+# Per-minute credit balance and disk IOPS over the burn-in (see
+# IAAS/PAAS_BURN_IN_METRICS in lib/common.sh for how to read them), once
+# Azure Monitor has caught up with its last minutes.
+if $BURN_IN; then
   echo "== waiting ${METRIC_INGESTION_LAG_SECONDS}s for Azure Monitor ingestion =="
   sleep "$METRIC_INGESTION_LAG_SECONDS"
-
-  json="$(az monitor metrics list --resource "$rid" --metric "${metrics[@]}" \
-    --start-time "$since" --end-time "$(now_iso)" \
-    --interval PT5M --aggregation Minimum Maximum -o json 2>/dev/null || true)"
-  if [ -z "$json" ]; then
-    echo "WARNING: credit metric query failed for $rid" >&2
-    return 0
-  fi
-  python3 -c '
-import json, sys
-for m in json.load(sys.stdin).get("value", []):
-    print(m["name"]["value"] + "  (per 5 min: min / max)")
-    pts = [p for ts in m.get("timeseries", []) for p in ts.get("data", [])
-           if p.get("minimum") is not None or p.get("maximum") is not None]
-    if not pts:
-        print("  no data points yet")
-    for p in pts:
-        low, high = (f"{v:.1f}" if v is not None else "-" for v in (p.get("minimum"), p.get("maximum")))
-        stamp = p["timeStamp"]
-        print(f"  {stamp}  {low} / {high}")
-' <<<"$json"
-}
-
-if $BURN_IN; then
-  report_burn_in_credits "$METRICS_RESOURCE_ID" "$LOAD_START" | tee "$RUN_DIR/burnin-credits.txt"
+  report_burn_in "$METRICS_RESOURCE_ID" "$LOAD_START" | tee "$RUN_DIR/burnin-metrics.txt"
 fi
 
 echo "Done: $RUN_DIR"
