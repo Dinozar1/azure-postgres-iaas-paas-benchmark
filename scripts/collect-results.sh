@@ -2,8 +2,8 @@
 # Aggregates the per-run output pulled locally by run-benchmark.sh
 # (results/<environment>/<run-id>/) into results/<environment>/summary.csv,
 # one row per measured run:
-#   - phase: pilot or main (run-benchmark.sh --phase); only main runs make the
-#     final dataset
+#   - phase: pilot, main or explanatory (run-benchmark.sh --phase); only main
+#     runs make the final dataset
 #   - steady_state: whether the run meets the environment's steady-state
 #     criterion (lib/common.sh, steady_state); failing runs are kept, flagged
 #   - pgbench throughput and latency (summary.txt)
@@ -175,8 +175,12 @@ for run_dir in "$RESULTS_DIR"/*/; do
 
   steady="$(steady_state "$ENV_NAME" \
     "disk_burst_io_pct_min=${metric_values[disk_burst_io_pct_min]-}" \
+    "disk_burst_io_pct_first=${metric_values[disk_burst_io_pct_first]-}" \
+    "disk_burst_io_pct_last=${metric_values[disk_burst_io_pct_last]-}" \
     "cpu_credits_remaining_min=${metric_values[cpu_credits_remaining_min]-}" \
-    "cpu_credits_remaining_max=${metric_values[cpu_credits_remaining_max]-}")"
+    "cpu_credits_remaining_max=${metric_values[cpu_credits_remaining_max]-}" \
+    "cpu_credits_remaining_first=${metric_values[cpu_credits_remaining_first]-}" \
+    "cpu_credits_remaining_last=${metric_values[cpu_credits_remaining_last]-}")"
 
   {
     printf '%s,%s,%s,%s,%s,%s,%s' "$run_id" "$phase" "$measure_start" "$steady" "$idle_gap" "$tps" "$latency"

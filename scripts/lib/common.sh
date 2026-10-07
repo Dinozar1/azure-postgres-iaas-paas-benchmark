@@ -18,7 +18,7 @@ DB_PORT=5432
 # 30 min at the full burst rate, but this workload bursts below that rate, so
 # a Premium P20 ran dry only after ~46 min. 60 minutes covers the IaaS disks;
 # the Burstable tier's CPU credits take longer and are drained adaptively
-# (burn_in_drain_rule).
+# (burn_in_pools).
 BURN_IN_SECONDS=3600             # minimum, every configuration
 BURN_IN_MAX_SECONDS=14400        # safety limit for an adaptive burn-in (4 h)
 BURN_IN_CHECK_SECONDS=300        # adaptive burn-in: how often the pool is read
@@ -28,7 +28,35 @@ BURN_IN_DRAIN_MARGIN_SECONDS=600 # adaptive burn-in: load kept on after the
 # Phases of the campaign (CLAUDE.md, "Plan statystyczny"). Recorded per run in
 # meta.env and as the phase column of summary.csv, so pilot runs never enter
 # the final dataset. Defaults to pilot: the main phase has to be asked for.
-VALID_PHASES="pilot main"
+VALID_PHASES="pilot main explanatory"
+
+# Environments outside the main four-configuration matrix (CLAUDE.md,
+# "Eksperyment wyjaśniający"). Their runs are always phase explanatory, and
+# no other environment's runs may be, so neither can leak into the other.
+EXPLANATORY_ENVIRONMENTS="iaas-premium-ssd-readcache"
+
+# default_phase_for <environment>
+default_phase_for() {
+  if [[ " $EXPLANATORY_ENVIRONMENTS " == *" $1 "* ]]; then echo explanatory; else echo pilot; fi
+}
+
+# check_phase <environment> <phase> — exits on a phase the environment may not use.
+check_phase() {
+  local env="$1" phase="$2" explanatory_env=false
+  if [[ " $VALID_PHASES " != *" $phase "* ]]; then
+    echo "Unknown phase: $phase (valid: $VALID_PHASES)" >&2
+    exit 1
+  fi
+  [[ " $EXPLANATORY_ENVIRONMENTS " == *" $env "* ]] && explanatory_env=true
+  if $explanatory_env && [ "$phase" != explanatory ]; then
+    echo "$env is an explanatory experiment: its runs must be phase explanatory" >&2
+    exit 1
+  fi
+  if ! $explanatory_env && [ "$phase" = explanatory ]; then
+    echo "phase explanatory is reserved for: $EXPLANATORY_ENVIRONMENTS" >&2
+    exit 1
+  fi
+}
 
 # How long Azure Monitor takes to make a platform metric queryable. A query
 # over a window that ended more recently than this can come back partially
@@ -53,7 +81,7 @@ RESULTS_STORAGE_RG="rg-tfstate-pgbench"
 RESULTS_STORAGE_ACCOUNT="sttfstatepgbench01"
 RESULTS_CONTAINER="results"
 
-VALID_ENVIRONMENTS="iaas-standard-ssd iaas-premium-ssd paas-burstable paas-general-purpose"
+VALID_ENVIRONMENTS="iaas-standard-ssd iaas-premium-ssd paas-burstable paas-general-purpose iaas-premium-ssd-readcache"
 
 usage_env_arg() {
   echo "Usage: $(basename "$0") <environment>" >&2
@@ -205,6 +233,8 @@ IAAS_METRIC_SPEC=(
   "cpu_pct_max|Percentage CPU|maximum"
   "cpu_credits_remaining_min|CPU Credits Remaining|minimum"
   "cpu_credits_remaining_max|CPU Credits Remaining|maximum"
+  "cpu_credits_remaining_first|CPU Credits Remaining|first"
+  "cpu_credits_remaining_last|CPU Credits Remaining|last"
   "mem_available_bytes_min|Available Memory Bytes|minimum"
   "disk_read_iops_avg|Data Disk Read Operations/Sec|average"
   "disk_read_iops_max|Data Disk Read Operations/Sec|maximum"
@@ -217,6 +247,8 @@ IAAS_METRIC_SPEC=(
   "vm_uncached_iops_consumed_pct_max|VM Uncached IOPS Consumed Percentage|maximum"
   "disk_burst_io_pct_min|Data Disk Used Burst IO Credits Percentage|minimum"
   "disk_burst_io_pct_max|Data Disk Used Burst IO Credits Percentage|maximum"
+  "disk_burst_io_pct_first|Data Disk Used Burst IO Credits Percentage|first"
+  "disk_burst_io_pct_last|Data Disk Used Burst IO Credits Percentage|last"
   "disk_burst_bps_pct_max|Data Disk Used Burst BPS Credits Percentage|maximum"
 )
 # Names verified against a live Standard_B2s_v2 VM's metric definitions on
@@ -224,6 +256,9 @@ IAAS_METRIC_SPEC=(
 # day confirmed Azure fills every one of them for the uncached data disk.
 # disk_burst_io_pct_min is the pool state at the start of the window (the used
 # share only grows under load), disk_burst_io_pct_max the state at its end.
+# *_first / *_last are the first and last per-minute readings in the window:
+# their difference says which way a pool was moving during the run, which
+# min/max alone cannot (the explanatory environment's criterion needs it).
 
 # Flexible Server publishes its own, lowercase metric set. Every name below was
 # verified against a live GP_Standard_D2s_v3 server in belgiumcentral on
@@ -286,9 +321,11 @@ PAAS_BURN_IN_METRICS=(
 # steady_state=false; the analysis excludes it and reports it separately. The
 # thresholds may be revised only on the evidence of a burn-in's credit curve,
 # never on TPS results.
-STEADY_DISK_BURST_IO_PCT_MIN=99    # IaaS: disk pool spent, disk_burst_io_pct_min >= this
-STEADY_CPU_CREDITS_MIN=0           # IaaS: CPU not throttled, cpu_credits_remaining_min > this
-STEADY_BURSTABLE_CPU_CREDITS_MAX=1 # B1ms: CPU credits spent, cpu_credits_remaining_max <= this
+STEADY_DISK_BURST_IO_PCT_MIN=99 # disk pool spent: disk_burst_io_pct_min >= this
+STEADY_CPU_CREDITS_MIN=0        # IaaS: CPU not throttled, cpu_credits_remaining_min > this
+STEADY_CPU_CREDITS_SPENT_MAX=1  # CPU credits spent: cpu_credits_remaining_max <= this
+STEADY_TREND_USED_PCT_TOL=1     # disk pool not draining: used share grew <= this over the window
+STEADY_TREND_CREDITS_TOL=0.5    # CPU pool not draining: credits fell <= this over the window
 
 # steady_state <environment> [column=value ...]
 #
@@ -297,66 +334,110 @@ STEADY_BURSTABLE_CPU_CREDITS_MAX=1 # B1ms: CPU credits spent, cpu_credits_remain
 # is not the bottleneck); nothing when the metrics the criterion needs are
 # missing, so it cannot be judged. One principle behind every criterion: the
 # measured state must be one the configuration holds indefinitely under this
-# load. On IaaS the CPU runs below its baseline once the disk pool is spent,
+# load — every pool that drains under it is spent. On the main IaaS
+# configurations the CPU runs below its baseline once the disk pool is spent,
 # so credits > 0 lasts forever there; on B1ms the CPU runs above its baseline,
-# so only spent credits are sustainable.
+# so only spent credits are sustainable. The explanatory read-cache
+# environment, where it is not known in advance which pools drain, applies the
+# principle directly: each pool is either spent or not draining during the run.
 steady_state() {
-  local env="$1" burst="" credits_min="" credits_max="" kv
+  local env="$1" kv
+  local burst_min="" burst_first="" burst_last="" credits_min="" credits_max="" credits_first="" credits_last=""
   shift
   for kv in "$@"; do
     case "$kv" in
-    disk_burst_io_pct_min=*) burst="${kv#*=}" ;;
+    disk_burst_io_pct_min=*) burst_min="${kv#*=}" ;;
+    disk_burst_io_pct_first=*) burst_first="${kv#*=}" ;;
+    disk_burst_io_pct_last=*) burst_last="${kv#*=}" ;;
     cpu_credits_remaining_min=*) credits_min="${kv#*=}" ;;
     cpu_credits_remaining_max=*) credits_max="${kv#*=}" ;;
+    cpu_credits_remaining_first=*) credits_first="${kv#*=}" ;;
+    cpu_credits_remaining_last=*) credits_last="${kv#*=}" ;;
     esac
   done
   case "$env" in
+  iaas-premium-ssd-readcache)
+    [ -n "$burst_min" ] && [ -n "$burst_first" ] && [ -n "$burst_last" ] &&
+      [ -n "$credits_max" ] && [ -n "$credits_first" ] && [ -n "$credits_last" ] || return 0
+    awk -v bmin="$burst_min" -v bfirst="$burst_first" -v blast="$burst_last" \
+      -v cmax="$credits_max" -v cfirst="$credits_first" -v clast="$credits_last" \
+      -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v bt_tol="$STEADY_TREND_USED_PCT_TOL" \
+      -v ct="$STEADY_CPU_CREDITS_SPENT_MAX" -v ct_tol="$STEADY_TREND_CREDITS_TOL" \
+      'BEGIN {
+        disk_ok = (bmin >= bt) || (blast - bfirst <= bt_tol)
+        cpu_ok = (cmax <= ct) || (cfirst - clast <= ct_tol)
+        print (disk_ok && cpu_ok) ? "true" : "false"
+      }'
+    ;;
   iaas-*)
-    [ -n "$burst" ] && [ -n "$credits_min" ] || return 0
-    awk -v b="$burst" -v c="$credits_min" \
+    [ -n "$burst_min" ] && [ -n "$credits_min" ] || return 0
+    awk -v b="$burst_min" -v c="$credits_min" \
       -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_CPU_CREDITS_MIN" \
       'BEGIN { print (b >= bt && c > ct) ? "true" : "false" }'
     ;;
   paas-burstable)
     [ -n "$credits_max" ] || return 0
-    awk -v c="$credits_max" -v ct="$STEADY_BURSTABLE_CPU_CREDITS_MAX" \
+    awk -v c="$credits_max" -v ct="$STEADY_CPU_CREDITS_SPENT_MAX" \
       'BEGIN { print (c <= ct) ? "true" : "false" }'
     ;;
   paas-general-purpose) echo "n/a" ;;
   esac
 }
 
-# burn_in_drain_rule <environment>
+# burn_in_pools <environment>
 #
-# For an environment whose credit pool takes longer than BURN_IN_SECONDS to
-# drain, prints "metric|threshold": the burn-in goes on until the metric reads
-# at or below the threshold, plus BURN_IN_DRAIN_MARGIN_SECONDS. Nothing for the
-# rest, which burn in for exactly BURN_IN_SECONDS — the IaaS disk pools drain
-# within it (P20 after ~46 min), checked per run by the steady-state criterion,
-# and the General Purpose tier has no pool that drains under this load.
-burn_in_drain_rule() {
+# The credit pools an adaptive burn-in watches, one per line:
+#   metric|kind|spent_at|mode
+# kind is "balance" (remaining credits, falling as the pool drains) or "used"
+# (share of the pool spent, rising as it drains); spent_at the reading at
+# which the pool counts as spent. mode:
+#   until_spent     the pool always drains under this load (B1ms CPU credits):
+#                   go on until it is spent
+#   while_draining  it may or may not drain (IaaS): go on while it is still
+#                   draining — moving toward spent over the last
+#                   BURN_IN_TREND_SECONDS — until it is spent or levels out
+# Either way the burn-in lasts at least BURN_IN_SECONDS, keeps the load on for
+# BURN_IN_DRAIN_MARGIN_SECONDS after a pool first reads spent, and stops at
+# BURN_IN_MAX_SECONDS. The General Purpose tier has no pool that drains under
+# this load, so it burns in for exactly BURN_IN_SECONDS.
+burn_in_pools() {
   case "$1" in
-  paas-burstable) echo "cpu_credits_remaining|0" ;;
+  paas-burstable)
+    echo "cpu_credits_remaining|balance|0|until_spent"
+    ;;
+  iaas-*)
+    echo "Data Disk Used Burst IO Credits Percentage|used|99|while_draining"
+    echo "CPU Credits Remaining|balance|0|while_draining"
+    ;;
   esac
 }
+BURN_IN_TREND_SECONDS=900      # look-back for "still draining"
+BURN_IN_TREND_MIN_SPAN=600     # shortest series span a trend is judged on
+BURN_IN_TREND_USED_PCT_TOL=1   # "used" pool still draining if it rose by more than this
+BURN_IN_TREND_CREDITS_TOL=0.5  # "balance" pool still draining if it fell by more than this
 
-# latest_metric_value <resource_id> <metric>
+# metric_trend <resource_id> <metric> <lookback_seconds>
 #
-# Prints "value timestamp" for the newest per-minute average of a metric in
-# the last 20 minutes, or nothing if there is none yet.
-latest_metric_value() {
+# Prints "latest earliest span_seconds latest_timestamp" from the per-minute
+# averages of a metric over the look-back window (latest and earliest
+# readings, and the time between them), or nothing if there is no data yet.
+metric_trend() {
   az monitor metrics list --resource "$1" --metric "$2" \
-    --start-time "$(date -u -d '-20 min' +%Y-%m-%dT%H:%M:%SZ)" \
+    --start-time "$(date -u -d "-$(($3 / 60 + 5)) min" +%Y-%m-%dT%H:%M:%SZ)" \
     --interval PT1M --aggregation Average -o json 2>/dev/null | python3 -c '
 import json, sys
+from datetime import datetime
 try:
     data = json.load(sys.stdin)
 except ValueError:
     sys.exit(0)
-pts = [p for m in data.get("value", []) for ts in m.get("timeseries", [])
-       for p in ts.get("data", []) if p.get("average") is not None]
+pts = sorted((p["timeStamp"], p["average"]) for m in data.get("value", [])
+             for ts in m.get("timeseries", []) for p in ts.get("data", [])
+             if p.get("average") is not None)
 if pts:
-    print(pts[-1]["average"], pts[-1]["timeStamp"])
+    t = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    span = int(t(pts[-1][0]) - t(pts[0][0]))
+    print(pts[-1][1], pts[0][1], span, pts[-1][0])
 ' || true
 }
 
@@ -543,6 +624,13 @@ for m in data.get("value", []):
     series[name] = pts
 
 def reduce(name, how):
+    if how in ("first", "last"):
+        pts = sorted((p["timeStamp"], p["average"]) for p in series.get(name, [])
+                     if p.get("average") is not None)
+        if not pts:
+            return ""
+        idx = 0 if how == "first" else -1
+        return f"{pts[idx][1]:.2f}"
     vals = [p[how] for p in series.get(name, []) if p.get(how) is not None]
     if not vals:
         return ""

@@ -10,9 +10,10 @@
 #      idle time between), then the remaining repetitions back to back
 #   6. teardown.sh (collect, check metrics, archive, terraform destroy)
 #
-# Usage: run-session.sh <environment> <repetitions> [--phase pilot|main]
+# Usage: run-session.sh <environment> <repetitions> [--phase pilot|main|explanatory]
 #   --phase  marks every run of the session (default pilot: only runs
-#            explicitly marked main make the final dataset)
+#            explicitly marked main make the final dataset; the explanatory
+#            environment iaas-premium-ssd-readcache is always explanatory)
 #
 # Nothing may be left running: a trap runs teardown.sh --force on any error,
 # on Ctrl+C (SIGINT), SIGTERM and SIGHUP (the terminal closing), and a second
@@ -27,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 usage() {
-  echo "Usage: $(basename "$0") <environment> <repetitions> [--phase pilot|main]" >&2
+  echo "Usage: $(basename "$0") <environment> <repetitions> [--phase pilot|main|explanatory]" >&2
   echo "  environment: one of $VALID_ENVIRONMENTS" >&2
   exit 1
 }
@@ -42,7 +43,7 @@ require_env_dir "$ENV_NAME"
   exit 1
 }
 
-PHASE=pilot
+PHASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
   --phase)
@@ -57,10 +58,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [[ " $VALID_PHASES " != *" $PHASE "* ]]; then
-  echo "Unknown phase: $PHASE (valid: $VALID_PHASES)" >&2
-  exit 1
-fi
+PHASE="${PHASE:-$(default_phase_for "$ENV_NAME")}"
+check_phase "$ENV_NAME" "$PHASE"
 
 mkdir -p "$RESULTS_ROOT/$ENV_NAME"
 LOG="$RESULTS_ROOT/$ENV_NAME/session-$(date -u +%Y%m%dT%H%M%SZ).log"

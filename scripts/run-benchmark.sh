@@ -5,11 +5,12 @@
 # TRUNCATE pgbench_history and VACUUM ANALYZE to reset state before the next
 # repetition of this config.
 #
-# Usage: run-benchmark.sh <environment> [--burn-in] [--phase pilot|main]
+# Usage: run-benchmark.sh <environment> [--burn-in] [--phase pilot|main|explanatory]
 #
 # --phase records which part of the campaign the run belongs to (meta.env,
 # phase column of summary.csv). Default pilot: only runs explicitly marked
-# main make the final dataset.
+# main make the final dataset. The explanatory environment
+# (iaas-premium-ssd-readcache) always runs, and defaults to, phase explanatory.
 #
 # --burn-in precedes the repetition with one continuous pgbench — no warm-up,
 # no per-transaction log, no reset — and goes straight on into the repetition.
@@ -17,12 +18,15 @@
 # every credit pool that drains under this load has drained, and never less
 # than BURN_IN_SECONDS (60 min): a freshly created resource starts with full
 # pools, so without it the first sustained load measures a bursting resource
-# rather than the state the configuration holds indefinitely. Where a pool
-# takes longer than that (burn_in_drain_rule in lib/common.sh — the Burstable
-# tier's CPU credits), the load keeps running while the pool is read from
-# Azure Monitor every BURN_IN_CHECK_SECONDS; once it reads empty, the load
-# continues BURN_IN_DRAIN_MARGIN_SECONDS more to cover metric lag, then stops,
-# with BURN_IN_MAX_SECONDS as a safety limit.
+# rather than the state the configuration holds indefinitely. The pools to
+# watch come from burn_in_pools in lib/common.sh: the Burstable tier's CPU
+# credits always drain and are run down until spent; on IaaS the disk pool
+# and the VM's CPU credits are followed while they are still draining. The
+# load keeps running while the pools are read from Azure Monitor every
+# BURN_IN_CHECK_SECONDS; a pool that reads spent gets
+# BURN_IN_DRAIN_MARGIN_SECONDS more to cover metric lag, and the burn-in stops
+# once every pool is spent or (where allowed) has levelled out, with
+# BURN_IN_MAX_SECONDS as a safety limit.
 #
 # Nothing may sit between the burn-in and the measurement, because idle time
 # is exactly what refills the pools (a Standard SSD E20 refills completely in
@@ -50,7 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 usage() {
-  echo "Usage: $(basename "$0") <environment> [--burn-in] [--phase pilot|main]" >&2
+  echo "Usage: $(basename "$0") <environment> [--burn-in] [--phase pilot|main|explanatory]" >&2
   echo "  environment: one of $VALID_ENVIRONMENTS" >&2
   exit 1
 }
@@ -61,7 +65,7 @@ shift
 require_env_dir "$ENV_NAME"
 
 BURN_IN=false
-PHASE=pilot
+PHASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
   --burn-in) BURN_IN=true ;;
@@ -77,10 +81,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [[ " $VALID_PHASES " != *" $PHASE "* ]]; then
-  echo "Unknown phase: $PHASE (valid: $VALID_PHASES)" >&2
-  exit 1
-fi
+PHASE="${PHASE:-$(default_phase_for "$ENV_NAME")}"
+check_phase "$ENV_NAME" "$PHASE"
 
 resolve_db_target "$ENV_NAME" "$ENV_DIR"
 push_pgpass "$ENV_DIR"
@@ -118,7 +120,7 @@ trap 'exit 129' HUP
 # remote_run <burnin|measure> <run_id> <burn_in_seconds> <stoppable>
 #
 # Executes one load on the client VM over SSH. With stoppable=1 the burn-in's
-# pgbench may be ended early by a signal (watch_burn_in_drain) without that
+# pgbench may be ended early by a signal (watch_burn_in) without that
 # counting as a failure.
 remote_run() {
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${CLIENT_IP}" \
@@ -197,43 +199,70 @@ echo "RUN_END=$(now)" >>window.env
 REMOTE_SCRIPT
 }
 
-# watch_burn_in_drain <remote_pid> <metric> <threshold> <out_file>
+# watch_burn_in <remote_pid> <out_file>
 #
-# Runs alongside a stoppable burn-in. Every BURN_IN_CHECK_SECONDS it reads the
-# pool from Azure Monitor; once BURN_IN_SECONDS have passed and the pool has
-# read at or below the threshold for BURN_IN_DRAIN_MARGIN_SECONDS, it stops the
-# load (SIGTERM to pgbench on the client). If pgbench ends by itself first,
-# the safety limit was hit. Writes BURN_IN_STOP=drained|limit and
-# BURN_IN_DRAINED_AT to out_file.
-watch_burn_in_drain() {
-  local pid="$1" metric="$2" threshold="$3" out="$4"
-  local start drained_at="" reading value stamp elapsed
+# Runs alongside a stoppable burn-in. Every BURN_IN_CHECK_SECONDS it reads each
+# pool from burn_in_pools; once BURN_IN_SECONDS have passed and every pool is
+# done — spent for BURN_IN_DRAIN_MARGIN_SECONDS, or, in while_draining mode, no
+# longer draining over the last BURN_IN_TREND_SECONDS — it stops the load
+# (SIGTERM to pgbench on the client). If pgbench ends by itself first, the
+# safety limit was hit. Writes BURN_IN_STOP=done|limit and BURN_IN_POOLS (the
+# final state of every pool) to out_file.
+watch_burn_in() {
+  local pid="$1" out="$2"
+  local start elapsed now i line metric kind spent_at mode reading
+  local latest earliest span stamp state summary all_done
+  local -a metrics=() kinds=() spent_ats=() modes=() spent_since=() states=()
+  while IFS='|' read -r metric kind spent_at mode; do
+    [ -n "$metric" ] || continue
+    metrics+=("$metric"); kinds+=("$kind"); spent_ats+=("$spent_at"); modes+=("$mode")
+    spent_since+=(""); states+=("unknown")
+  done < <(burn_in_pools "$ENV_NAME")
+
   start=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$BURN_IN_CHECK_SECONDS"
     kill -0 "$pid" 2>/dev/null || break
-    elapsed=$(($(date +%s) - start))
-    reading="$(latest_metric_value "$METRICS_RESOURCE_ID" "$metric")"
-    value="${reading%% *}"
-    stamp="${reading#* }"
-    echo "   burn-in $((elapsed / 60)) min: $metric = ${value:-no data}${reading:+ (@$stamp)}"
-    if [ -z "$drained_at" ] && [ -n "$value" ] &&
-      awk -v v="$value" -v t="$threshold" 'BEGIN { exit !(v <= t) }'; then
-      drained_at=$(date +%s)
-      echo "   $metric at or below $threshold — keeping the load on ${BURN_IN_DRAIN_MARGIN_SECONDS}s more for metric lag"
-    fi
-    if [ -n "$drained_at" ] && [ "$elapsed" -ge "$BURN_IN_SECONDS" ] &&
-      [ $(($(date +%s) - drained_at)) -ge "$BURN_IN_DRAIN_MARGIN_SECONDS" ]; then
-      echo "   pool drained: stopping the burn-in after $((elapsed / 60)) min"
+    now=$(date +%s)
+    elapsed=$((now - start))
+    all_done=true
+    summary=""
+    for i in "${!metrics[@]}"; do
+      reading="$(metric_trend "$METRICS_RESOURCE_ID" "${metrics[$i]}" "$BURN_IN_TREND_SECONDS")"
+      read -r latest earliest span stamp <<<"$reading"
+      if [ -z "$latest" ]; then
+        state="no-data"
+      elif awk -v v="$latest" -v t="${spent_ats[$i]}" -v k="${kinds[$i]}" \
+        'BEGIN { exit !(k == "used" ? v >= t : v <= t) }'; then
+        [ -n "${spent_since[$i]}" ] || spent_since[i]=$now
+        if [ $((now - spent_since[i])) -ge "$BURN_IN_DRAIN_MARGIN_SECONDS" ]; then
+          state="spent"
+        else
+          state="spent-margin"
+        fi
+      elif [ "${modes[$i]}" = while_draining ] && [ "${span:-0}" -ge "$BURN_IN_TREND_MIN_SPAN" ] &&
+        awk -v l="$latest" -v e="$earliest" -v k="${kinds[$i]}" \
+          -v ut="$BURN_IN_TREND_USED_PCT_TOL" -v ct="$BURN_IN_TREND_CREDITS_TOL" \
+          'BEGIN { exit !(k == "used" ? l - e <= ut : e - l <= ct) }'; then
+        state="level"
+      else
+        state="draining"
+      fi
+      states[i]="$state"
+      case "$state" in spent | level) ;; *) all_done=false ;; esac
+      summary+="${summary:+; }${metrics[$i]}=${latest:-?} ($state)"
+    done
+    echo "   burn-in $((elapsed / 60)) min: $summary"
+    if [ "$elapsed" -ge "$BURN_IN_SECONDS" ] && $all_done; then
+      echo "   every pool spent or levelled out: stopping the burn-in after $((elapsed / 60)) min"
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${CLIENT_IP}" "pkill -x pgbench" || true
-      printf 'BURN_IN_STOP=drained\nBURN_IN_DRAINED_AT=%s\n' \
-        "$(date -u -d "@$drained_at" +%Y-%m-%dT%H:%M:%SZ)" >"$out"
+      printf 'BURN_IN_STOP=done\nBURN_IN_POOLS=%s\n' "$summary" >"$out"
       return 0
     fi
   done
-  echo "WARNING: burn-in reached the ${BURN_IN_MAX_SECONDS}s safety limit before $metric drained;" \
-    "the runs that follow will most likely fail the steady-state criterion" >&2
-  printf 'BURN_IN_STOP=limit\nBURN_IN_DRAINED_AT=\n' >"$out"
+  echo "WARNING: burn-in reached the ${BURN_IN_MAX_SECONDS}s safety limit before every pool was spent" \
+    "or levelled out; the runs that follow may fail the steady-state criterion" >&2
+  printf 'BURN_IN_STOP=limit\nBURN_IN_POOLS=%s\n' "$summary" >"$out"
 }
 
 # run_on_client <burnin|measure> <run_id>
@@ -243,22 +272,22 @@ watch_burn_in_drain() {
 run_on_client() {
   local mode="$1" run_id="$2"
   local run_dir="$RESULTS_ROOT/$ENV_NAME/$run_id"
-  local prev_run_end load_start idle_gap="" burn_in=false rule="" stop_file=""
+  local prev_run_end load_start idle_gap="" burn_in=false pools="" stop_file=""
   if [ "$mode" = burnin ]; then burn_in=true; fi
   if [ -e "$run_dir" ]; then
     echo "ERROR: $run_dir already exists — refusing to overwrite an earlier run" >&2
     exit 1
   fi
   prev_run_end="$(latest_load_end "$RESULTS_ROOT/$ENV_NAME")"
-  if $burn_in; then rule="$(burn_in_drain_rule "$ENV_NAME")"; fi
+  if $burn_in; then pools="$(burn_in_pools "$ENV_NAME")"; fi
 
-  if [ -n "$rule" ]; then
+  if [ -n "$pools" ]; then
     stop_file="$(mktemp)"
-    echo "   adaptive burn-in: at least ${BURN_IN_SECONDS}s, until ${rule%%|*} <= ${rule#*|}," \
-      "at most ${BURN_IN_MAX_SECONDS}s"
+    echo "   adaptive burn-in: at least ${BURN_IN_SECONDS}s, at most ${BURN_IN_MAX_SECONDS}s, watching:"
+    sed 's/^/     /' <<<"$pools"
     remote_run "$mode" "$run_id" "$BURN_IN_MAX_SECONDS" 1 &
     REMOTE_PID=$!
-    watch_burn_in_drain "$REMOTE_PID" "${rule%%|*}" "${rule#*|}" "$stop_file"
+    watch_burn_in "$REMOTE_PID" "$stop_file"
     wait "$REMOTE_PID"
     REMOTE_PID=""
   else

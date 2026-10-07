@@ -20,7 +20,7 @@ variable "ssh_public_key" {
 }
 
 variable "data_disk_type" {
-  description = "Storage type for the PostgreSQL data disk: \"StandardSSD_LRS\" (E10) or \"Premium_LRS\" (P10). This is the parameter under test for this environment."
+  description = "Storage type for the PostgreSQL data disk: \"StandardSSD_LRS\" (E20 at 512 GB) or \"Premium_LRS\" (P20). This is the parameter under test for this environment."
   type        = string
 }
 

@@ -28,3 +28,20 @@ variable "postgres_admin_password" {
   type        = string
   sensitive   = true
 }
+
+variable "data_disk_caching" {
+  description = <<-EOT
+    Host caching mode for the PostgreSQL data disk. "None" for the main
+    experiment matrix, so measured IOPS and latency reflect the disk tier
+    itself. "ReadOnly" only for the explanatory iaas-premium-ssd-readcache
+    environment, which tests whether the PaaS host read cache explains the
+    IaaS-PaaS gap (see CLAUDE.md).
+  EOT
+  type        = string
+  default     = "None"
+
+  validation {
+    condition     = contains(["None", "ReadOnly"], var.data_disk_caching)
+    error_message = "data_disk_caching must be \"None\" or \"ReadOnly\" (ReadWrite would cache writes and change durability semantics)."
+  }
+}

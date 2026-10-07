@@ -37,6 +37,8 @@ Uzasadnienie: warianty 1-2 pokazują wpływ warstwy dyskowej (rozdz. 2.4 pracy),
 
 Konfiguracja PostgreSQL na IaaS jest przeniesiona z serwera PaaS GP (sekcja "Parytet konfiguracji PostgreSQL" niżej). Wariant IaaS na ustawieniach domyślnych świadomie **nie** jest częścią macierzy.
 
+Poza macierzą: **eksperyment wyjaśniający** `iaas-premium-ssd-readcache` (Premium P20 z cache odczytu hosta) — sekcja "Eksperyment wyjaśniający: cache odczytu na IaaS" niżej. Nie wchodzi do głównego porównania 4 konfiguracji.
+
 Rozmiar dysku 512 GB nie jest arbitralny — patrz sekcja "Decyzja: rozmiar dysku 512 GB" niżej. Przy pierwotnie planowanych 128 GB oba tiery mają identyczne 500 IOPS i porównanie warstwy dyskowej nie miałoby czego mierzyć.
 
 ## Decyzja: rozmiar dysku 512 GB
@@ -66,7 +68,10 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 - **Kredyty burst dysku: realny problem.** `Data Disk Used Burst IO Credits Percentage` rosło 0% → 9% → 17% w trakcie 12-minutowego pomiaru. Dysk startuje z pełną pulą kredytów, zużywa je pod obciążeniem i odbudowuje w bezczynności — więc pierwszy przebieg po utworzeniu środowiska mierzy dysk *burstujący*, a nie stan ustalony danego tieru.
   - **Jeden standardowy przebieg NIE drenuje puli.** ~14 min obciążenia (warm-up + pomiar) to za mało: pula wystarcza na ~30 min przy maksymalnym burście, a pierwszy test zużył 17% na 12 min.
   - **Zasada ogólna (ustalona 2026-10-07): burn-in trwa, aż wyczerpią się wszystkie pule kredytów, które pod tym obciążeniem się wyczerpują; minimum 60 min.** Uzasadnienie: mierzymy stan, który konfiguracja utrzyma **bez końca** pod tym obciążeniem. Na IaaS CPU w stanie ustalonym pracuje poniżej poziomu bazowego, więc „kredyty CPU > 0” trwa dowolnie długo, a jedyną wyczerpującą się pulą jest pula dysku; na B1ms CPU (31–38%) pracuje powyżej poziomu bazowego, więc „kredyty > 0” to stan przejściowy, a utrzymywalny jest dopiero stan po ich wyczerpaniu.
-  - **Protokół `run-benchmark.sh --burn-in`** (pierwszy przebieg po `init-db.sh`): ciągły pgbench — bez warm-upu, bez `-l`, bez VACUUM, nieliczony do wyników — i **od razu, w tym samym wywołaniu**, pierwszy przebieg pomiarowy. IaaS i GP: stałe **60 min** (`BURN_IN_SECONDS`) — pula dysku P20 drenuje się przy tym obciążeniu po ~46 min (35 min nie wystarczyło, sanity check `iaas-premium-ssd`), co per przebieg weryfikuje kryterium stanu ustalonego; GP nie ma puli, która by się wyczerpywała. **B1ms (`paas-burstable`): burn-in adaptacyjny** (`burn_in_drain_rule`) — pgbench startuje z limitem bezpieczeństwa **4 h** (`BURN_IN_MAX_SECONDS`), co **5 min** (bez przerywania obciążenia) skrypt czyta `cpu_credits_remaining` z Azure Monitor; gdy po co najmniej 60 min odczyt pokaże 0, obciążenie trwa jeszcze **10 min** zapasu na lag metryki, po czym pgbench jest zatrzymywany. `meta.env` burn-inu zapisuje `BURN_IN_STOP=drained|limit` i `BURN_IN_DRAINED_AT`. Log postępu burn-inu (`-P 60`, `summary.txt` w katalogu `burnin-*`) jest zachowywany i archiwizowany — to dane o fazie burstu do osobnego opisu w rozdz. 5. Między burn-inem a pomiarem nie może być bezczynności, bo właśnie w bezczynności dysk odbudowuje kredyty: E20 (500 bazowo / 600 burst) ma pulę ~180 tys. IO odnawianą tempem ~500 IO/s, więc jest pełna po ~6 min; 300 s czekania na Azure Monitor odbudowałoby ~80% puli (P20: ~30%). Dlatego raport burn-inu (tabela per minuta, `burnin-metrics.txt`) liczy się **w tle** po lagu ingestii (300 s), a wypisuje na końcu wywołania. IaaS: `Data Disk Used Burst IO Credits Percentage` obok IOPS odczytu/zapisu (i ich sumy), `Data Disk IOPS Consumed Percentage` oraz `CPU Credits Remaining` i `Percentage CPU` — przy wyższym TPS na Premium VM może dojść do granicy CPU, a `B2s_v2` ma kredyty CPU.
+  - **Protokół `run-benchmark.sh --burn-in`** (pierwszy przebieg po `init-db.sh`): ciągły pgbench — bez warm-upu, bez `-l`, bez VACUUM, nieliczony do wyników — i **od razu, w tym samym wywołaniu**, pierwszy przebieg pomiarowy. GP: stałe **60 min** (`BURN_IN_SECONDS`) — nie ma puli, która by się wyczerpywała. Pozostałe konfiguracje: **burn-in adaptacyjny** (`burn_in_pools` w `scripts/lib/common.sh`) — pgbench startuje z limitem bezpieczeństwa **4 h** (`BURN_IN_MAX_SECONDS`), a co **5 min** (bez przerywania obciążenia) skrypt czyta pule z Azure Monitor:
+    - **B1ms (`paas-burstable`), tryb `until_spent`:** `cpu_credits_remaining` zawsze się wyczerpuje — burn-in trwa, aż odczyt pokaże 0.
+    - **IaaS (wszystkie środowiska `iaas-*`), tryb `while_draining`:** pula dysku (`Data Disk Used Burst IO Credits Percentage`) i kredyty CPU VM (`CPU Credits Remaining`) — burn-in trwa, dopóki któraś z nich wciąż się wyczerpuje (zmiana w stronę wyczerpania w ostatnich 15 min większa niż 1 p.p. dla dysku / 0,5 kredytu dla CPU), aż każda będzie wyczerpana albo się ustabilizuje. Przy wyższym CPU (np. z cache odczytu) `B2s_v2` może zacząć zużywać kredyty CPU — wtedy burn-in ciągnie się do ich wyczerpania; na głównych konfiguracjach IaaS kredyty CPU w stanie ustalonym rosną, więc burn-in kończy się po ~60 min (P20 drenuje dysk po ~46 min; 35 min nie wystarczyło, sanity check `iaas-premium-ssd`).
+    - Pula odczytana jako wyczerpana dostaje jeszcze **10 min** zapasu na lag metryki; burn-in kończy się po co najmniej 60 min, gdy wszystkie pule są „wyczerpane” lub „stabilne”. `meta.env` burn-inu zapisuje `BURN_IN_STOP=done|limit` i `BURN_IN_POOLS` (końcowy stan każdej puli). Log postępu burn-inu (`-P 60`, `summary.txt` w katalogu `burnin-*`) jest zachowywany i archiwizowany — to dane o fazie burstu do osobnego opisu w rozdz. 5. Między burn-inem a pomiarem nie może być bezczynności, bo właśnie w bezczynności dysk odbudowuje kredyty: E20 (500 bazowo / 600 burst) ma pulę ~180 tys. IO odnawianą tempem ~500 IO/s, więc jest pełna po ~6 min; 300 s czekania na Azure Monitor odbudowałoby ~80% puli (P20: ~30%). Dlatego raport burn-inu (tabela per minuta, `burnin-metrics.txt`) liczy się **w tle** po lagu ingestii (300 s), a wypisuje na końcu wywołania. IaaS: `Data Disk Used Burst IO Credits Percentage` obok IOPS odczytu/zapisu (i ich sumy), `Data Disk IOPS Consumed Percentage` oraz `CPU Credits Remaining` i `Percentage CPU` — przy wyższym TPS na Premium VM może dojść do granicy CPU, a `B2s_v2` ma kredyty CPU.
   - **Burn-in na wszystkich 4 konfiguracjach** — jednolity protokół, także tam, gdzie dysk nie burstuje; na B1ms drenuje kredyty CPU.
   - Raport burn-inu zapisuje też surowe minutowe serie wszystkich metryk z okna burn-inu (`burnin-azure-metrics.json`) — razem z logiem `-P 60` to materiał do opisu fazy burstu w rozdz. 5.
   - **PaaS: brak bezpośredniego dowodu.** Flexible Server nie publikuje metryki kredytów storage, a `cpu_credits_remaining` wypełnia się tylko na Burstable — dlatego tabela pokazuje `cpu_credits_remaining`, `cpu_percent`, `iops`, `read_iops` + `write_iops` i `disk_iops_consumed_percentage`. Odczyty idą w dużej części z cache hosta (patrz "Sanity check"), więc o obciążeniu samego dysku mówi `disk_iops_consumed_percentage`, nie `iops`. Interpretacja: IOPS najpierw powyżej ~2300 (poziom bazowy przy 512 GiB), potem spadek do niego → pula się opróżniła; IOPS od początku poniżej 2300 → dysk nie jest wąskim gardłem i bursting nie wpływa na tę konfigurację. Flexible Server nie ma też metryki latencji dysku — latencja I/O po stronie PaaS pochodzi wyłącznie z `pg_stat_io` (`track_io_timing`).
@@ -80,6 +85,28 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 **Ważne:** dokładne nazwy SKU dla Flexible Server bywają zależne od regionu — zawsze zweryfikuj przed `apply`:
 `az postgres flexible-server list-skus --location belgiumcentral`
 
+## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
+
+**Uzasadnienie — zestawienie z sanity checków (pojedyncze przebiegi, nie wnioski):**
+
+| | PaaS GP (`GP_Standard_D2s_v3`) | IaaS Premium P20 (`Standard_B2s_v2`, `caching = "None"`) |
+|---|---|---|
+| TPS | **1346**, bez dryfu (1349 → 1341) | **~862** w stanie ustalonym (ostatnie 3 min; 1247 w burście) |
+| CPU | **87%** średnio | **31–36%** w stanie ustalonym |
+| IOPS | ~3600 `iops`, z tego dysk ~75–89% limitu 2300 | **~2345** — równo na poziomie bazowym P20 |
+| Wąskie gardło | CPU | dysk (IOPS P20) |
+
+Konfiguracja PostgreSQL jest wyrównana (15/15 parametrów), klasa maszyny ta sama (2 vCPU / 8 GiB). Najbardziej prawdopodobne źródło różnicy to **cache hosta**: na PaaS odczyty omijają limit dysku (`disk_iops_consumed_percentage` ≈ `write_iops` / 2300), na IaaS (`caching = "None"`) nie. Bez sprawdzenia tego porównanie IaaS vs PaaS mierzyłoby w dużej mierze ustawienie cache, a nie model wdrożenia.
+
+**Hipoteza (zapisana przed pomiarem):** z cache odczytu IaaS Premium zbliża się do PaaS GP, a wąskim gardłem staje się CPU. Hipotezę podważy TPS pozostający w okolicy ~860 (cache nie pomaga — różnica leży gdzie indziej) albo przepustowość ograniczona nadal przez IOPS dysku przy niskim CPU.
+
+**Projekt:**
+- Środowisko `environments/iaas-premium-ssd-readcache`: Premium P20 512 GB, `data_disk_caching = "ReadOnly"`, wszystko inne identyczne z `iaas-premium-ssd` (ta sama konfiguracja PostgreSQL, VM, sieć, klient). `data_disk_caching` przechodzi przez `iaas-environment` (domyślnie `"None"`, walidacja: `None` | `ReadOnly`). Osobny klucz stanu: `iaas-premium-ssd-readcache.tfstate`.
+- **Poza główną macierzą:** jedna sesja, 5 przebiegów: `scripts/run-session.sh iaas-premium-ssd-readcache 5`. Faza `explanatory` jest dla tego środowiska domyślna i wymuszona.
+- `Standard_B2s_v2` ma cache hosta (`az vm list-skus`): z cache 9000 IOPS / 125 MB/s wobec 3750 IOPS / 85 MB/s bez cache. **Rozmiaru cache Azure nie publikuje** (brak `CachedDiskBytes`), więc przy bazie 14,6 GiB trafienia w cache są niewiadomą — to część tego, co eksperyment mierzy.
+- Burn-in: adaptacyjny dla IaaS (sekcja "Bursting") — przy wyższym CPU kredyty CPU `B2s_v2` mogą zacząć schodzić, wtedy burn-in trwa do ich wyczerpania.
+- Kryterium stanu ustalonego według tej samej zasady (wyczerpane wszystkie pule, które pod obciążeniem się wyczerpują): dla każdej puli — wyczerpana albo nie wyczerpuje się w oknie pomiaru (tabela w "Kryterium ważności przebiegu"). Do tego kolumny `*_first` / `*_last` (pierwszy i ostatni odczyt puli w oknie), bo min/max nie mówią, w którą stronę pula się ruszała.
+
 ## Kryterium ważności przebiegu (ustalone 2026-10-07, przed pilotażem)
 
 Przebieg pomiarowy liczy się do zbioru „stan ustalony” tylko, jeśli spełnia kryterium swojej konfiguracji. Kryterium zapisane **przed** pilotażem, żeby nie dobierać go pod wyniki.
@@ -88,6 +115,7 @@ Przebieg pomiarowy liczy się do zbioru „stan ustalony” tylko, jeśli spełn
 |---|---|
 | IaaS (`iaas-standard-ssd`, `iaas-premium-ssd`) | `disk_burst_io_pct_min >= 99` **oraz** `cpu_credits_remaining_min > 0` |
 | PaaS GP (`paas-general-purpose`) | brak kryterium — sanity check: dysk nie jest wąskim gardłem |
+| Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`) | każda pula wyczerpana **albo** nie wyczerpuje się w oknie pomiaru: (`disk_burst_io_pct_min >= 99` lub `disk_burst_io_pct_last − disk_burst_io_pct_first <= 1`) **oraz** (`cpu_credits_remaining_max <= 1` lub `cpu_credits_remaining_first − cpu_credits_remaining_last <= 0,5`) — ustalone przed pomiarem |
 | PaaS Burstable (`paas-burstable`) | `cpu_credits_remaining_max <= 1` w oknie pomiaru (kredyty CPU wyczerpane) — ustalone po sanity checku B1ms, przed pilotażem |
 
 - Wszystkie kryteria wynikają z tej samej zasady co burn-in: stan, który konfiguracja utrzyma bez końca pod tym obciążeniem. Stąd na IaaS „kredyty CPU > 0” (CPU poniżej poziomu bazowego), a na B1ms odwrotnie „kredyty wyczerpane” (CPU powyżej bazowego). Dla B1ms odrzucono wariant „burst I/O wyczerpany i kredyty > 0” z progiem na IOPS: opisywałby stan przejściowy, a opierałby się na pośrednim progu z metryki `iops`, która (jak na GP) liczy też odczyty z cache hosta; wariant B opiera się na publikowanej metryce `cpu_credits_remaining`.
@@ -185,7 +213,7 @@ Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla sub
 - Pomiar z wnętrza PostgreSQL (te same zapytania na IaaS i PaaS): snapshoty `pg_stat_io`, `pg_stat_database` (`pgbench_db`) i `pg_stat_bgwriter` tuż przed i tuż po pomiarze właściwym; raz na przebieg `version()` i `pg_stat_ssl` dla własnego połączenia. `track_io_timing = on` na obu ramionach (IaaS: `pg_conftool` w cloud-init, PaaS: `azurerm_postgresql_flexible_server_configuration`)
 
 ## Plan statystyczny
-1. Pilotaż: 5 przebiegów na każdą z 4 konfiguracji → policz odchylenie standardowe TPS/latencji. **Przebiegi pilotażu nie trafiają do końcowego zbioru**: każdy przebieg ma w `meta.env` i w `summary.csv` kolumnę `phase` (`pilot` / `main`). Domyślnie `pilot` — fazę `main` trzeba podać jawnie (`--phase main`), więc pomyłka może najwyżej wykluczyć przebieg, nigdy wmieszać pilotaż do danych.
+1. Pilotaż: 5 przebiegów na każdą z 4 konfiguracji → policz odchylenie standardowe TPS/latencji. **Przebiegi pilotażu nie trafiają do końcowego zbioru**: każdy przebieg ma w `meta.env` i w `summary.csv` kolumnę `phase` (`pilot` / `main` / `explanatory` — ta ostatnia wyłącznie dla eksperymentu wyjaśniającego i dla niego obowiązkowa; skrypty pilnują tego w obie strony). Domyślnie `pilot` — fazę `main` trzeba podać jawnie (`--phase main`), więc pomyłka może najwyżej wykluczyć przebieg, nigdy wmieszać pilotaż do danych.
 2. Na tej podstawie wylicz wymaganą liczbę powtórzeń N dla sensownego przedziału ufności (spodziewane 15-25)
 3. Randomizacja kolejności konfiguracji i pory dnia pomiarów (rozłożone na różne dni — argument na zmienność chmury w czasie)
 4. Raportowanie: średnia ± CI, nigdy pojedyncze liczby
@@ -217,7 +245,8 @@ azure-postgres-iaas-paas-benchmark/
 │   ├── iaas-standard-ssd/
 │   ├── iaas-premium-ssd/
 │   ├── paas-burstable/
-│   └── paas-general-purpose/
+│   ├── paas-general-purpose/
+│   └── iaas-premium-ssd-readcache/ # eksperyment wyjaśniający (cache odczytu), poza macierzą
 ├── scripts/
 │   ├── lib/common.sh              # wspólna konfiguracja (parametry pgbench, SSH, .pgpass) + helpery
 │   ├── init-db.sh <env>           # pgbench -i -s 1000 (raz na środowisko, przed pierwszym run-benchmark.sh)

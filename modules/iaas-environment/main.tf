@@ -39,6 +39,7 @@ module "db_vm" {
   subnet_id               = module.network.subnet_id
   ssh_public_key          = var.ssh_public_key
   data_disk_type          = var.data_disk_type
+  data_disk_caching       = var.data_disk_caching
   postgres_admin_password = var.postgres_admin_password
 
   # allowed_client_address_space left at module default (10.0.0.0/16) —

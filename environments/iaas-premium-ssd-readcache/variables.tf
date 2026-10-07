@@ -29,3 +29,8 @@ variable "postgres_admin_password" {
   type        = string
   sensitive   = true
 }
+
+variable "data_disk_caching" {
+  description = "Host caching mode for the PostgreSQL data disk. \"ReadOnly\" in this environment — the one parameter that differs from iaas-premium-ssd."
+  type        = string
+}

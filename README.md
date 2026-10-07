@@ -21,6 +21,11 @@ the same `pgbench` workload (TPC-B-like, scale 1000, 25 clients).
 | `paas-burstable`       | PaaS  | Flexible Server `B_Standard_B1ms`     | Premium SSD P20 (managed)   |
 | `paas-general-purpose` | PaaS  | Flexible Server `GP_Standard_D2s_v3`  | Premium SSD P20 (managed)   |
 
+Outside the matrix, `iaas-premium-ssd-readcache` is an explanatory experiment:
+`iaas-premium-ssd` with host read caching on the data disk, testing whether
+the PaaS host read cache explains the IaaS-PaaS gap. Its runs are always
+phase `explanatory`.
+
 The IaaS servers carry over the PostgreSQL configuration Azure applies to the
 General Purpose server, so both arms run the same engine settings
 (`modules/iaas-vm`, variable `postgresql_settings`).
