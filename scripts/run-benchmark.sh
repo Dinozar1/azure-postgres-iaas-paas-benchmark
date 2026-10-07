@@ -7,14 +7,18 @@
 #
 # Usage: run-benchmark.sh <environment> [--burn-in]
 #
-# --burn-in replaces that sequence with one continuous pgbench of
+# --burn-in precedes the repetition with one continuous pgbench of
 # BURN_IN_SECONDS (35 min) — no warm-up, no per-transaction log, no reset —
-# then waits out the Azure Monitor ingestion lag and prints, per minute, the
-# credit balance it was meant to drain and the disk IOPS (burnin-metrics.txt). Run it once after init-db.sh: a freshly created disk
-# starts with a full burst-credit pool, so the first sustained load measures a
-# bursting disk rather than the steady state the disk tier actually provides,
-# and a single standard run is too short to empty that pool. collect-results.sh
-# skips burn-in runs.
+# and goes straight on into the repetition. Use it for the first repetition
+# after init-db.sh: a freshly created disk starts with a full burst-credit
+# pool, so the first sustained load measures a bursting disk rather than the
+# steady state the disk tier actually provides, and a single standard run is
+# too short to empty that pool. Nothing may sit between the burn-in and the
+# measurement, because idle time is exactly what refills the pool (a Standard
+# SSD E20 refills completely in about 6 minutes). So the per-minute report on
+# the burn-in window — credits, IOPS, CPU — is produced in the background once
+# Azure Monitor has ingested its last minutes, saved to burnin-metrics.txt and
+# printed at the end. collect-results.sh skips burn-in runs.
 #
 # Around the measured run (immediately before and after it) the script
 # snapshots pg_stat_io, pg_stat_database and pg_stat_bgwriter, and once per run
@@ -51,26 +55,32 @@ done
 resolve_db_target "$ENV_NAME" "$ENV_DIR"
 push_pgpass "$ENV_DIR"
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-MODE=measure
-if $BURN_IN; then
-  RUN_ID="burnin-$RUN_ID"
-  MODE=burnin
-fi
 CLIENT_IP="$(tf_output "$ENV_DIR" client_vm_public_ip)"
-RUN_DIR="$RESULTS_ROOT/$ENV_NAME/$RUN_ID"
-PREV_RUN_END="$(latest_load_end "$RESULTS_ROOT/$ENV_NAME")"
+# Read now, while the environment certainly exists: after terraform destroy
+# the resource id is no longer obtainable from state, and Azure stops serving
+# metrics for a deleted resource.
+METRICS_RESOURCE_ID="$(tf_output "$ENV_DIR" metrics_resource_id)"
+mkdir -p "$RESULTS_ROOT/$ENV_NAME"
 
-if $BURN_IN; then
-  echo "== $ENV_NAME / BURN-IN $RUN_ID: continuous load for ${BURN_IN_SECONDS}s (drains burst credits, excluded from dataset) =="
-else
-  echo "== $ENV_NAME / run $RUN_ID: warm-up (${WARMUP_SECONDS}s, not counted) + measured run (${MEASURE_SECONDS}s) =="
-fi
+# run_on_client <burnin|measure> <run_id>
+#
+# Executes one load on the client VM, pulls its output back to
+# results/<environment>/<run_id>/ and writes meta.env there.
+run_on_client() {
+  local mode="$1" run_id="$2"
+  local run_dir="$RESULTS_ROOT/$ENV_NAME/$run_id"
+  local prev_run_end load_start idle_gap="" burn_in=false
+  if [ "$mode" = burnin ]; then burn_in=true; fi
+  if [ -e "$run_dir" ]; then
+    echo "ERROR: $run_dir already exists — refusing to overwrite an earlier run" >&2
+    exit 1
+  fi
+  prev_run_end="$(latest_load_end "$RESULTS_ROOT/$ENV_NAME")"
 
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${CLIENT_IP}" \
-  bash -s -- "$MODE" "$DB_HOST" "$DB_USER" "$DB_NAME" "$DB_PORT" "$ENV_NAME" "$RUN_ID" \
-  "$WARMUP_SECONDS" "$MEASURE_SECONDS" "$BURN_IN_SECONDS" \
-  "$PGBENCH_CLIENTS" "$PGBENCH_JOBS" "$PROGRESS_INTERVAL" <<'REMOTE_SCRIPT'
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${CLIENT_IP}" \
+    bash -s -- "$mode" "$DB_HOST" "$DB_USER" "$DB_NAME" "$DB_PORT" "$ENV_NAME" "$run_id" \
+    "$WARMUP_SECONDS" "$MEASURE_SECONDS" "$BURN_IN_SECONDS" \
+    "$PGBENCH_CLIENTS" "$PGBENCH_JOBS" "$PROGRESS_INTERVAL" <<'REMOTE_SCRIPT'
 set -euo pipefail
 MODE="$1"; DB_HOST="$2"; DB_USER="$3"; DB_NAME="$4"; DB_PORT="$5"; ENV_NAME="$6"; RUN_ID="$7"
 WARMUP_SECONDS="$8"; MEASURE_SECONDS="$9"; BURN_IN_SECONDS="${10}"
@@ -134,45 +144,59 @@ fi
 echo "RUN_END=$(now)" >>window.env
 REMOTE_SCRIPT
 
-echo "== pulling results back to $RUN_DIR =="
-mkdir -p "$RESULTS_ROOT/$ENV_NAME"
-client_vm_scp_from "$ENV_DIR" "pgbench-results/${ENV_NAME}/${RUN_ID}" "$RUN_DIR"
+  echo "== pulling results back to $run_dir =="
+  client_vm_scp_from "$ENV_DIR" "pgbench-results/${ENV_NAME}/${run_id}" "$run_dir"
 
-LOAD_START="$(env_get "$RUN_DIR/window.env" LOAD_START)"
-IDLE_GAP_S=""
-if [ -n "$PREV_RUN_END" ] && [ -n "$LOAD_START" ]; then
-  IDLE_GAP_S=$(($(iso_to_epoch "$LOAD_START") - $(iso_to_epoch "$PREV_RUN_END")))
-fi
-METRICS_RESOURCE_ID="$(tf_output "$ENV_DIR" metrics_resource_id)"
+  load_start="$(env_get "$run_dir/window.env" LOAD_START)"
+  if [ -n "$prev_run_end" ] && [ -n "$load_start" ]; then
+    idle_gap=$(($(iso_to_epoch "$load_start") - $(iso_to_epoch "$prev_run_end")))
+  fi
 
-# Recorded now, while the environment still exists: after terraform destroy the
-# resource id is no longer obtainable from state, and Azure stops serving
-# metrics for a deleted resource. PREV_RUN_END is the end of the previous load
-# on this environment (an earlier run or init-db.sh); IDLE_GAP_S the seconds
-# from there to this run's first query — the time the disk had to refill.
-cat >"$RUN_DIR/meta.env" <<META
+  # PREV_RUN_END is the end of the previous load on this environment (an
+  # earlier run, a burn-in or init-db.sh); IDLE_GAP_S the seconds from there
+  # to this run's first query — the time the disk had to refill.
+  cat >"$run_dir/meta.env" <<META
 ENV_NAME=$ENV_NAME
-RUN_ID=$RUN_ID
-BURN_IN=$BURN_IN
+RUN_ID=$run_id
+BURN_IN=$burn_in
 METRICS_RESOURCE_ID=$METRICS_RESOURCE_ID
-PREV_RUN_END=$PREV_RUN_END
-IDLE_GAP_S=$IDLE_GAP_S
+PREV_RUN_END=$prev_run_end
+IDLE_GAP_S=$idle_gap
 META
 
-# Per-minute credit balance and disk IOPS over the burn-in (see
-# IAAS/PAAS_BURN_IN_METRICS in lib/common.sh for how to read them), once
-# Azure Monitor has caught up with its last minutes.
+  if [ -n "$idle_gap" ]; then
+    echo "Idle gap since the previous load on $ENV_NAME ($prev_run_end): ${idle_gap}s"
+  fi
+}
+
+REPORT_PID=""
 if $BURN_IN; then
-  echo "== waiting ${METRIC_INGESTION_LAG_SECONDS}s for Azure Monitor ingestion =="
-  sleep "$METRIC_INGESTION_LAG_SECONDS"
-  report_burn_in "$METRICS_RESOURCE_ID" "$LOAD_START" | tee "$RUN_DIR/burnin-metrics.txt"
+  BURN_IN_ID="burnin-$(date -u +%Y%m%dT%H%M%SZ)"
+  BURN_IN_DIR="$RESULTS_ROOT/$ENV_NAME/$BURN_IN_ID"
+  echo "== $ENV_NAME / BURN-IN $BURN_IN_ID: continuous load for ${BURN_IN_SECONDS}s (drains burst credits, excluded from dataset) =="
+  run_on_client burnin "$BURN_IN_ID"
+
+  # In the background, so the measured run starts now rather than after the
+  # ingestion lag: those minutes of idle disk would refill the credits the
+  # burn-in has just spent.
+  nohup bash -c 'source "$1"; sleep "$2"; report_burn_in "$3" "$4" "$5"' _ \
+    "$SCRIPT_DIR/lib/common.sh" "$METRIC_INGESTION_LAG_SECONDS" "$METRICS_RESOURCE_ID" \
+    "$(env_get "$BURN_IN_DIR/window.env" LOAD_START)" \
+    "$(env_get "$BURN_IN_DIR/window.env" MEASURE_END)" \
+    >"$BURN_IN_DIR/burnin-metrics.txt" 2>&1 </dev/null &
+  REPORT_PID=$!
+  echo "== burn-in report: in the background, ready in ~${METRIC_INGESTION_LAG_SECONDS}s at $BURN_IN_DIR/burnin-metrics.txt =="
 fi
 
-echo "Done: $RUN_DIR"
-if [ -n "$IDLE_GAP_S" ]; then
-  echo "Idle gap since the previous load on $ENV_NAME ($PREV_RUN_END): ${IDLE_GAP_S}s"
-fi
-if $BURN_IN; then
-  echo "NOTE: burn-in run, excluded from the dataset by collect-results.sh"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+echo "== $ENV_NAME / run $RUN_ID: warm-up (${WARMUP_SECONDS}s, not counted) + measured run (${MEASURE_SECONDS}s) =="
+run_on_client measure "$RUN_ID"
+echo "Done: $RESULTS_ROOT/$ENV_NAME/$RUN_ID"
+
+if [ -n "$REPORT_PID" ]; then
+  wait "$REPORT_PID" || true
+  echo
+  echo "== burn-in $BURN_IN_ID ($BURN_IN_DIR/burnin-metrics.txt) =="
+  cat "$BURN_IN_DIR/burnin-metrics.txt"
 fi
 exit 0

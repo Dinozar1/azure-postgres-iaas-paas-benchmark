@@ -35,6 +35,8 @@ Region i rozmiar VM wymuszone przez realne ograniczenia subskrypcji studenckiej 
 
 Uzasadnienie: warianty 1-2 pokazują wpływ warstwy dyskowej (rozdz. 2.4 pracy), warianty 3-4 pokazują kompromis tańszy/wolniejszy vs droższy/wydajniejszy w modelu zarządzanym.
 
+Konfiguracja PostgreSQL na IaaS jest przeniesiona z serwera PaaS GP (sekcja "Parytet konfiguracji PostgreSQL" niżej). Wariant IaaS na ustawieniach domyślnych świadomie **nie** jest częścią macierzy.
+
 Rozmiar dysku 512 GB nie jest arbitralny — patrz sekcja "Decyzja: rozmiar dysku 512 GB" niżej. Przy pierwotnie planowanych 128 GB oba tiery mają identyczne 500 IOPS i porównanie warstwy dyskowej nie miałoby czego mierzyć.
 
 ## Decyzja: rozmiar dysku 512 GB
@@ -63,8 +65,9 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 
 - **Kredyty burst dysku: realny problem.** `Data Disk Used Burst IO Credits Percentage` rosło 0% → 9% → 17% w trakcie 12-minutowego pomiaru. Dysk startuje z pełną pulą kredytów, zużywa je pod obciążeniem i odbudowuje w bezczynności — więc pierwszy przebieg po utworzeniu środowiska mierzy dysk *burstujący*, a nie stan ustalony danego tieru.
   - **Jeden standardowy przebieg NIE drenuje puli.** ~14 min obciążenia (warm-up + pomiar) to za mało: pula wystarcza na ~30 min przy maksymalnym burście, a pierwszy test zużył 17% na 12 min.
-  - **Protokół `run-benchmark.sh --burn-in`** (raz po `init-db.sh`, nieliczony do wyników): ciągły `pgbench -T 2100` (35 min) — bez warm-upu, bez `-l`, bez VACUUM — potem odczekanie lagu ingestii Azure Monitor (300 s) i wypisanie tabeli per minuta (zapis w `burnin-metrics.txt`), jako dowód, że pula jest pusta przed pomiarami. IaaS: `Data Disk Used Burst IO Credits Percentage` obok IOPS odczytu/zapisu (i ich sumy) oraz `Data Disk IOPS Consumed Percentage`.
-  - **PaaS: brak bezpośredniego dowodu.** Flexible Server nie publikuje metryki kredytów storage, a `cpu_credits_remaining` wypełnia się tylko na Burstable — dlatego tabela pokazuje `iops`, `read_iops` + `write_iops` i `disk_iops_consumed_percentage`. Interpretacja: IOPS najpierw powyżej ~2300 (poziom bazowy przy 512 GiB), potem spadek do niego → pula się opróżniła; IOPS od początku poniżej 2300 → dysk nie jest wąskim gardłem i bursting nie wpływa na tę konfigurację. Flexible Server nie ma też metryki latencji dysku — latencja I/O po stronie PaaS pochodzi wyłącznie z `pg_stat_io` (`track_io_timing`).
+  - **Protokół `run-benchmark.sh --burn-in`** (pierwszy przebieg po `init-db.sh`): ciągły `pgbench -T 2100` (35 min) — bez warm-upu, bez `-l`, bez VACUUM, nieliczony do wyników — i **od razu, w tym samym wywołaniu**, pierwszy przebieg pomiarowy. Między burn-inem a pomiarem nie może być bezczynności, bo właśnie w bezczynności dysk odbudowuje kredyty: E20 (500 bazowo / 600 burst) ma pulę ~180 tys. IO odnawianą tempem ~500 IO/s, więc jest pełna po ~6 min; 300 s czekania na Azure Monitor odbudowałoby ~80% puli (P20: ~30%). Dlatego raport burn-inu (tabela per minuta, `burnin-metrics.txt`) liczy się **w tle** po lagu ingestii (300 s), a wypisuje na końcu wywołania. IaaS: `Data Disk Used Burst IO Credits Percentage` obok IOPS odczytu/zapisu (i ich sumy), `Data Disk IOPS Consumed Percentage` oraz `CPU Credits Remaining` i `Percentage CPU` — przy wyższym TPS na Premium VM może dojść do granicy CPU, a `B2s_v2` ma kredyty CPU.
+  - **Burn-in na wszystkich 4 konfiguracjach** — jednolity protokół, także tam, gdzie dysk nie burstuje; na B1ms drenuje kredyty CPU.
+  - **PaaS: brak bezpośredniego dowodu.** Flexible Server nie publikuje metryki kredytów storage, a `cpu_credits_remaining` wypełnia się tylko na Burstable — dlatego tabela pokazuje `cpu_credits_remaining`, `cpu_percent`, `iops`, `read_iops` + `write_iops` i `disk_iops_consumed_percentage`. Odczyty idą w dużej części z cache hosta (patrz "Sanity check"), więc o obciążeniu samego dysku mówi `disk_iops_consumed_percentage`, nie `iops`. Interpretacja: IOPS najpierw powyżej ~2300 (poziom bazowy przy 512 GiB), potem spadek do niego → pula się opróżniła; IOPS od początku poniżej 2300 → dysk nie jest wąskim gardłem i bursting nie wpływa na tę konfigurację. Flexible Server nie ma też metryki latencji dysku — latencja I/O po stronie PaaS pochodzi wyłącznie z `pg_stat_io` (`track_io_timing`).
   - Per przebieg: `disk_burst_io_pct_min` (stan puli na początku okna pomiaru) i `disk_burst_io_pct_max` (na końcu) w CSV; w `meta.env` `PREV_RUN_END` (koniec poprzedniego obciążenia — przebiegu, burn-inu albo `init-db.sh`) i `IDLE_GAP_S`. Konsekwencja dla Fazy 4: *odstęp między przebiegami wpływa na stan kredytów*, więc jest raportowany (kolumna `idle_gap_s`).
 - **Kredyty CPU: dużo mniej istotne, niż zakładano — zweryfikowane dla Standard SSD 128 GB, do sprawdzenia na Premium 512 GB.** Pierwszy test szedł jeszcze na dysku 128 GB (500 IOPS); na Premium P20 (2300 IOPS) dysk mniej dławi przepustowość, więc CPU wykonuje więcej pracy na sekundę i wniosek może nie przetrwać. `Percentage CPU` na VM bazy wynosiło **~9–10%**, a `CPU Credits Remaining` **rosło** (76 → 79) w trakcie pomiaru. Obciążenie jest I/O-bound, więc model kredytowy CPU `B2s_v2` praktycznie nie działa jako ograniczenie — to koryguje wcześniejsze założenie, że throttling CPU będzie głównym zagrożeniem trafności przy zamianie `D2s_v5` → `B2s_v2`. Nadal warto to raportować, ale jako zweryfikowane (na razie dla jednej konfiguracji), nie jako domniemane.
 - **VM-klient nie jest wąskim gardłem:** CPU ~3%, co potwierdza sens odseparowanej maszyny klienckiej.
@@ -79,12 +82,43 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 
 Pełny łańcuch na PaaS: apply → `init-db.sh` (**6 min 59 s**) → `--burn-in` (35 min, 1255 TPS) → 1 przebieg → `teardown.sh` → weryfikacja, że w Azure nic nie zostało. Przebieg: **1346,0 TPS, 18,56 ± 7,79 ms**, p50/p95/p99/p99,9 = 16,1/33,4/45,4/90,9 ms, 0 nieudanych. PostgreSQL **16.15** (ta sama wersja minor co Ubuntu 24.04 na IaaS), połączenie **TLSv1.3** (`TLS_AES_256_GCM_SHA384`). Nazwy metryk Azure Monitor zweryfikowane dla obu typów zasobów (VM ma też `Data Disk Latency`; Flexible Server nie ma metryki latencji dysku ani kredytów storage).
 
-Ustalenia do rozdz. 4–6 (otwarte decyzje oznaczone **[DECYZJA]**):
-- **PaaS dostarcza więcej IOPS niż provisionowany tier.** Storage P20 = 2300 IOPS (`az postgres flexible-server show`), a `iops` trzymało ~3400–3650 przez 35 min burn-inu i cały pomiar, bez spadku. `disk_iops_consumed_percentage` ≈ `write_iops` / 2300 w każdej minucie → odczyty (~1800/s) idą najpewniej z cache hosta i nie obciążają dysku. To wniosek z danych, nie z dokumentacji. **Asymetria ramion:** IaaS ma świadomie `caching = "None"`, PaaS ma (de facto) cache odczytu — opisać jako cechę modelu zarządzanego. Dysk PaaS pracował na 72–89% swojego limitu, więc burn-in na PaaS niczego nie drenuje.
+Wyniki tego przebiegu (i pilotażu 128 GB z Fazy 1) są w `results/_archive/` — poza katalogami środowisk, poza zbiorem danych. Ustalenia do rozdz. 4–6:
+- **PaaS dostarcza więcej IOPS niż provisionowany tier.** Storage P20 = 2300 IOPS (`az postgres flexible-server show`), a `iops` trzymało ~3400–3650 przez 35 min burn-inu i cały pomiar, bez spadku. `disk_iops_consumed_percentage` ≈ `write_iops` / 2300 w każdej minucie → odczyty (~1800/s) idą najpewniej z cache hosta i nie obciążają dysku. Zgodne z dokumentacją Flexible Server: host caching dla dysków < 4 TiB. **Decyzja:** to cecha usługi zarządzanej i tak ją opisujemy (rozdz. 5–6); IaaS zostaje na `caching = "None"`, bo porównanie Standard vs Premium ma mierzyć warstwę dyskową, nie cache hosta. Dysk PaaS pracował na 72–89% swojego limitu, więc na GP burn-in nie ma czego drenować w storage — zostaje dla jednolitości protokołu.
 - **Na PaaS GP wąskim gardłem jest CPU**, nie dysk: `cpu_percent` śr. 87%, maks. 91,5% (2 vCore).
-- **[DECYZJA] Konfiguracja PostgreSQL nie jest parytetowa.** Azure stroi serwer (`results/paas-general-purpose/pg_settings-nondefault.csv`): `shared_buffers` 2 GiB (IaaS: domyślne 128 MB), `max_wal_size` 25 GB (1 GB), `checkpoint_timeout` 600 s (300 s), `effective_cache_size` 6 GiB, `random_page_cost` 2, `wal_compression`, `bgwriter_delay` 20 ms, a do tego narzuty, których IaaS nie ma: `archive_mode = always`, `data_checksums = on`. Do wyboru: IaaS na domyślnych (realizm „samodzielnej konfiguracji") albo ze strojeniem odpowiadającym PaaS (izolacja wpływu modelu). Przy następnym IaaS zrzucić to samo zapytanie dla porównania.
-- **[DECYZJA] Oczekiwanie na lag ingestii po burn-inie to bezczynność, w której dysk odbudowuje kredyty.** Z udokumentowanego modelu: E20 (500 bazowo / 600 burst) ma pulę ~180 tys. IO, odnawianą w bezczynności tempem ~500 IO/s → pełna po ~6 min, więc 300 s odnawia ~80% puli tuż przed pierwszym pomiarem (P20: ~30%). Do potwierdzenia kolumną `disk_burst_io_pct_min` pierwszego przebiegu na IaaS. Możliwa poprawka: raport burn-inu w tle, a pomiar startuje od razu.
+- **Konfiguracja PostgreSQL nie była parytetowa** — Azure stroi serwer (`results/_archive/paas-general-purpose-sanity-20261007/pg_settings-nondefault.csv`). **Decyzja:** parametry wydajnościowe przeniesione na IaaS, patrz "Parytet konfiguracji PostgreSQL".
+- **Oczekiwanie na lag ingestii po burn-inie było bezczynnością odbudowującą kredyty** (idle gap 352 s w tym przebiegu). **Decyzja:** raport burn-inu w tle, pomiar startuje od razu (protokół wyżej). Skuteczność do potwierdzenia kolumną `disk_burst_io_pct_min` pierwszego przebiegu na IaaS.
 - **Wariant 3 (`B_Standard_B1ms`) ma limit 640 IOPS po stronie obliczeniowej** (`list-skus`) — poniżej 2300 z P20, więc tam IOPS dławi SKU, nie storage.
+
+## Parytet konfiguracji PostgreSQL
+
+Punkt odniesienia: `pg_settings` serwera PaaS `GP_Standard_D2s_v3` (te same 2 vCPU / 8 GiB co `Standard_B2s_v2`). Na IaaS przeniesiony jest **każdy parametr wpływający na wydajność** (pamięć, WAL, checkpointy, autovacuum, koszty planera, zapis w tle) — w `modules/iaas-vm`, zmienna `postgresql_settings`, ustawiana przez `pg_conftool` w cloud-init przed pierwszym startem, plus `--data-checksums` w `pg_createcluster`. Nie przenosimy parametrów specyficznych dla Azure, logowania, certyfikatów ani rozszerzeń. Zrzut `pg_settings` na IaaS przy sanity checku ma potwierdzić, że wartości faktycznie się zastosowały. Kolumna "IaaS domyślnie" = PostgreSQL 16 na Ubuntu 24.04 bez strojenia.
+
+| Parametr | IaaS domyślnie | PaaS (GP) | Przeniesiony? | Uzasadnienie |
+|---|---|---|---|---|
+| `shared_buffers` | 128 MiB | 2 GiB | tak | pamięć: bufor stron w PostgreSQL, główny czynnik cache hit ratio |
+| `effective_cache_size` | 4 GiB | 6 GiB | tak | koszt planera: zakładany rozmiar cache (PG + OS) |
+| `maintenance_work_mem` | 64 MiB | 211 MiB (216064 kB) | tak | pamięć VACUUM i budowy indeksów — czas resetu i `init-db.sh` |
+| `wal_buffers` | auto (4 MiB przy 128 MiB `shared_buffers`) | 16 MiB | tak | WAL: bufor przed zapisem na dysk |
+| `wal_compression` | off | pglz | tak | WAL: mniej bajtów (full-page images) kosztem CPU |
+| `max_wal_size` | 1 GiB | 25 GiB | tak | checkpointy: przy 1 GiB wymuszane (`checkpoints_req`) w trakcie pomiaru |
+| `checkpoint_timeout` | 5 min | 10 min | tak | checkpointy: częstość i rozmiar zrzutów brudnych stron |
+| `bgwriter_delay` | 200 ms | 20 ms | tak | zapis w tle: częstość rund background writera |
+| `backend_flush_after` | 0 | 2 MiB | tak | zapis: wymuszony writeback z backendów, mniejsze piki I/O |
+| `vacuum_cost_page_miss` | 2 | 10 | tak | autovacuum: koszt odczytu strony spoza cache (throttling) |
+| `random_page_cost` | 4 | 2 | tak | koszt planera: losowy odczyt vs sekwencyjny |
+| `jit` | on | off | tak | wykonanie zapytań (pgbench nie przekracza progów JIT — dla parytetu) |
+| `default_toast_compression` | pglz | lz4 | tak | CPU kompresji TOAST (pgbench prawie nie używa — dla parytetu) |
+| `data_checksums` | off | on | tak (`--data-checksums`) | narzut CPU na każdy odczyt/zapis strony; integralność danych |
+| `track_io_timing` | off | on | tak (oba ramiona) | pomiar, nie strojenie: czasy I/O w `pg_stat_io` |
+| `archive_mode` / `archive_command` / `archive_timeout` | off / — / 0 | always / `BlobLogUpload.sh` / 300 s | **nie** | wbudowany backup PaaS (PITR): narzut po stronie PaaS i zarazem zaleta modelu — opisać w pracy |
+| `wal_keep_size` | 0 | 400 MB | nie | retencja WAL dla replikacji/odtwarzania PaaS, poza ścieżką zapisu |
+| `shared_preload_libraries` | — | `pg_cron`, `pg_stat_statements`, `azure`, `pg_qs`, … | nie | rozszerzenia Azure (narzut po stronie PaaS; `pg_stat_statements.track = none`) |
+| `temp_tablespaces`, `azure.enable_temp_tablespaces_on_local_ssd` | — | lokalny SSD | nie | specyficzne dla Azure; pgbench nie tworzy plików tymczasowych |
+| `max_connections`, `reserved_connections`, `superuser_reserved_connections` | 100 / 0 / 3 | 859 / 5 / 10 | nie | limity pojemności i dostęp administracyjny; 25 klientów |
+| `ssl`, `ssl_ciphers`, `ssl_*_file` | on (certyfikat snakeoil) / `HIGH:MEDIUM:+3DES:!aNULL` | on / ECDHE + AES-GCM/ChaCha20 | nie | szyfrowanie włączone na obu; TLS 1.3 negocjuje szyfr niezależnie od `ssl_ciphers` — potwierdza `pg_stat_ssl` |
+| `log_*`, `tcp_keepalives_*`, `authentication_timeout` | domyślne | zmienione | nie | logowanie i obsługa połączeń, poza ścieżką transakcji |
+| `lc_*`, kodowanie, `TimeZone`, `default_text_search_config` | domyślne | zmienione | nie | lokalizacja |
+| huge pages | `try`, brak zarezerwowanych stron w OS | nieznane (`shared_memory_size_in_huge_pages` to tylko wyliczenie) | nie | poziom OS, niewidoczne w `pg_settings` |
 
 ## Architektura testowa
 - **Osobna mała VM-klient** (`Standard_B2s_v2`) uruchamia pgbench — celowo odseparowana od serwera bazy, żeby nie zaburzać pomiaru CPU/RAM serwera (kluczowa metryka z USOS)
@@ -103,12 +137,12 @@ Pierwotny plan (`polandcentral` + `Standard_D2s_v5`) okazał się niewykonalny n
 Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla subskrypcji promocyjnych/studenckich nie jest w pełni przewidywalna z dokumentacji ani z komend informacyjnych — wymaga systematycznej, empirycznej weryfikacji (realny apply/destroy), nie tylko sprawdzenia quoty.
 
 ## Parametry pgbench (ustalone)
-- Scale factor: **1000** (**13 GB** bazy — zmierzone po `pgbench -i` w pierwszym teście; uwaga: `pg_database_size` po `init-db.sh` na PaaS dał **15,69 GB (14,6 GiB)** — przed rozdz. 4 ujednolicić, którą wielkość podajemy; celowo > 8 GB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache). `init-db.sh` zapisuje rozmiar i czas inicjalizacji w `results/<env>/init-*.env`.
+- Scale factor: **1000** (**15,69 GB = 14,6 GiB** bazy — `pg_database_size` po `init-db.sh`; wcześniejsze "13 GB" było odczytem w trakcie budowy klucza głównego; w pracy jednostki binarne (GiB); celowo > 8 GiB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache). `init-db.sh` zapisuje rozmiar i czas inicjalizacji w `results/<env>/init-*.env`.
 - Warm-up: 2 min, nieliczone do wyników
 - Pomiar właściwy: 12 min → `pgbench -c 25 -j 2 -T 720 -P 60 -l`
 - Klienci: `-c 25 -j 2`
 - Reset stanu: `TRUNCATE pgbench_history` + `VACUUM ANALYZE` po każdym powtórzeniu w obrębie tej samej konfiguracji; pełna reinicjalizacja (`pgbench -i -s 1000`) tylko przy zmianie konfiguracji
-- Burn-in: ciągły `pgbench -T 2100` raz po inicjalizacji, nieliczony (patrz "Bursting jako czynnik zakłócający")
+- Burn-in: ciągły `pgbench -T 2100` raz po inicjalizacji, nieliczony, bez przerwy przed pierwszym pomiarem (patrz "Bursting jako czynnik zakłócający")
 - Pomiar z wnętrza PostgreSQL (te same zapytania na IaaS i PaaS): snapshoty `pg_stat_io`, `pg_stat_database` (`pgbench_db`) i `pg_stat_bgwriter` tuż przed i tuż po pomiarze właściwym; raz na przebieg `version()` i `pg_stat_ssl` dla własnego połączenia. `track_io_timing = on` na obu ramionach (IaaS: `pg_conftool` w cloud-init, PaaS: `azurerm_postgresql_flexible_server_configuration`)
 
 ## Plan statystyczny
@@ -149,18 +183,19 @@ azure-postgres-iaas-paas-benchmark/
 │   ├── lib/common.sh              # wspólna konfiguracja (parametry pgbench, SSH, .pgpass) + helpery
 │   ├── init-db.sh <env>           # pgbench -i -s 1000 (raz na środowisko, przed pierwszym run-benchmark.sh)
 │   ├── run-benchmark.sh <env>     # warm-up + pomiar 12min + snapshoty pg_stat_* + TRUNCATE/VACUUM ANALYZE;
-│   │                              # --burn-in: ciągłe 35 min; ściąga wyniki do results/
+│   │                              # --burn-in: najpierw ciągłe 35 min; ściąga wyniki do results/
 │   ├── collect-results.sh <env>   # agreguje results/<env>/<run>/ → results/<env>/summary.csv
 │   ├── teardown.sh <env>          # collect → check metryk → gzip → upload → terraform destroy
 │   └── lib/run_stats.py           # percentyle latencji, TPS 3 min, delty pg_stat_* (dla collect-results)
 ├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
+│   └── _archive/                  # pilotaż 128 GB i sanity checki — poza zbiorem danych
 └── .github/workflows/             # opcjonalnie: terraform fmt -check + validate jako CI gate
 ```
 
 ### Jak działają `scripts/*.sh`
 - Uruchamiane **lokalnie** (nie na VM), łączą się przez SSH (`~/.ssh/id_rsa_pgbench` — RSA, bo provider azurerm 3.x odrzuca ed25519 w `admin_ssh_key`) do VM-klienta i tam zdalnie odpalają `pgbench`/`psql` — sama VM bazy nigdy nie jest dotykana bezpośrednio (dla IaaS: prywatny IP w tej samej podsieci; dla PaaS: publiczny FQDN Flexible Servera).
 - Hasło do bazy nigdy nie trafia do argumentów `ssh`/wiersza poleceń (ryzyko re-parsowania przez zdalną powłokę) — zamiast tego skrypt zapisuje `~/.pgpass` na VM-kliencie (`chmod 600`) przed każdym uruchomieniem, `pgbench`/`psql` czytają je automatycznie.
-- Kolejność użycia: `terraform apply` w danym `environments/<env>` → `init-db.sh <env>` (raz) → `run-benchmark.sh <env> --burn-in` (raz) → `run-benchmark.sh <env>` (N razy, per plan statystyczny) → `teardown.sh <env>`.
+- Kolejność użycia: `terraform apply` w danym `environments/<env>` → `init-db.sh <env>` (raz) → `run-benchmark.sh <env> --burn-in` (raz: burn-in + pierwszy przebieg pomiarowy) → `run-benchmark.sh <env>` (kolejne przebiegi, łącznie N per plan statystyczny) → `teardown.sh <env>`.
 - `teardown.sh` kończy sesję w jedynej kolejności, która nic nie gubi: odczekuje lag ingestii → `collect-results.sh` → sprawdza, że ostatni przebieg ma wypełnione wymagane kolumny metryk (inaczej przerywa **przed** `destroy`; `--force` świadomie to pomija) → gzip surowych logów `-l` → upload `results/<env>/` do kontenera `results` w `sttfstatepgbench01` → `terraform destroy -auto-approve` → sprawdzenie, że resource group zniknęła. Nieudany upload nie blokuje `destroy` (dane zostają lokalnie; zostawienie środowiska jest droższą porażką).
 - `summary.csv` (jeden wiersz na przebieg pomiarowy): TPS, średnia latencja, p50/p95/p99/p99.9 latencji i liczba nieudanych transakcji (z logów `-l`), TPS z pierwszych i ostatnich 3 min (dryf, np. koniec kredytów w trakcie pomiaru), cache hit ratio, odczyty/zapisy i ich czasy z `pg_stat_io`, checkpointy timed/req, `measure_start`, `server_version`, `idle_gap_s` oraz metryki Azure Monitor (IOPS odczyt/zapis, queue depth, % zużycia IOPS dysku, CPU, pamięć, kredyty). Nazwy kolumn wspólne dla IaaS i PaaS tam, gdzie wielkość jest ta sama.
 - Login/hasło do bazy dla PaaS pobierane z outputów Terraforma (`db_admin_login`, `db_name`, `db_fqdn`) — brak zahardkodowanych wartości mogących się rozjechać z `terraform.tfvars`. Dla IaaS `postgres`/`pgbench_db` są zahardkodowane w skrypcie zgodnie z `modules/iaas-vm/cloud-init.tpl` (tam też nie są parametryzowane).
@@ -189,7 +224,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 
 ## Plan działania (fazy)
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
-- **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog `results/iaas-standard-ssd/20260927T144916Z/` trzeba usunąć lub przenieść przed pomiarami na tym środowisku, inaczej `collect-results.sh` wliczy go do `summary.csv`.
+- **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - Faza 3: pilotaż (5×4 przebiegi) → wyliczenie N
 - Faza 4: właściwe pomiary (N×4, randomizacja)

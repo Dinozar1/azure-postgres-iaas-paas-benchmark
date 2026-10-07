@@ -82,6 +82,51 @@ variable "postgresql_version" {
   default     = "16"
 }
 
+variable "postgresql_settings" {
+  description = <<-EOT
+    postgresql.conf settings applied with pg_conftool before PostgreSQL first
+    starts. The defaults carry over every performance-relevant setting Azure
+    applies to the PaaS reference server — GP_Standard_D2s_v3, the same
+    2 vCPU / 8 GiB as Standard_B2s_v2 — read from its pg_settings, so both arms
+    run the same engine configuration and the comparison isolates the
+    deployment model. Azure-specific settings, logging, certificates,
+    extensions and the PaaS WAL archiving are deliberately not carried over;
+    CLAUDE.md has the full parameter table with the reason for each.
+  EOT
+  type        = map(string)
+  default = {
+    # Memory
+    shared_buffers       = "2GB"
+    effective_cache_size = "6GB"
+    maintenance_work_mem = "216064kB"
+    # WAL and checkpoints
+    wal_buffers        = "16MB"
+    wal_compression    = "pglz"
+    max_wal_size       = "25600MB"
+    checkpoint_timeout = "600s"
+    # Background writing and write-back
+    bgwriter_delay      = "20ms"
+    backend_flush_after = "2MB"
+    # Autovacuum
+    vacuum_cost_page_miss = "10"
+    # Planner and execution
+    random_page_cost          = "2"
+    jit                       = "off"
+    default_toast_compression = "lz4"
+    # Measurement, not tuning: I/O times in pg_stat_io / pg_stat_database.
+    # modules/paas-postgres sets the same on the Flexible Server.
+    track_io_timing = "on"
+  }
+
+  validation {
+    condition = alltrue([
+      for name, value in var.postgresql_settings :
+      can(regex("^[a-z_]+$", name)) && can(regex("^[A-Za-z0-9._]+$", value))
+    ])
+    error_message = "Setting names must be lowercase identifiers and values plain alphanumerics: cloud-init pastes both into shell commands unquoted."
+  }
+}
+
 variable "postgres_admin_password" {
   description = "Password for the PostgreSQL 'postgres' role. Supply via a gitignored tfvars file — never commit it."
   type        = string

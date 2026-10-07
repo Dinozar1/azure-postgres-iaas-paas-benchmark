@@ -14,6 +14,7 @@ module "vm" {
 
   custom_data = templatefile("${path.module}/cloud-init.tpl", {
     postgresql_version           = var.postgresql_version
+    postgresql_settings          = var.postgresql_settings
     postgres_admin_password      = var.postgres_admin_password
     allowed_client_address_space = var.allowed_client_address_space
   })

@@ -234,22 +234,28 @@ PAAS_METRIC_SPEC=(
   "storage_pct_max|storage_percent|maximum"
 )
 
-# Printed per minute after a burn-in, to show whether the burst-credit pool is
-# really drained before the measured runs start. On IaaS the data disk's
-# credit metric shows it directly, with IOPS alongside. Flexible Server
-# publishes no storage credit metric (and cpu_credits_remaining only fills on
-# Burstable), so there the evidence is IOPS against the provisioned baseline
-# (2300 at 512 GiB): IOPS above the baseline that later fall back to it mean
-# the pool emptied; IOPS that never reach it mean the disk is not the
-# bottleneck and bursting does not affect that configuration.
+# Printed per minute for the burn-in window (report_burn_in), to show whether
+# the burst-credit pool really is drained before the measured runs start. On
+# IaaS the data disk's credit metric shows it directly, with IOPS alongside.
+# Flexible Server publishes no storage credit metric and serves most reads
+# from a host cache, so there the evidence is IOPS against the provisioned
+# baseline (2300 at 512 GiB) and the share of it the disk consumes: IOPS
+# above the baseline that later fall back to it mean the pool emptied; a disk
+# that never reaches its limit is not the bottleneck, and bursting does not
+# affect that configuration. CPU and CPU credits are listed for both arms:
+# Standard_B2s_v2 and the Burstable tier run on CPU credits, and the higher
+# throughput of a faster disk can make CPU the limit instead.
 IAAS_BURN_IN_METRICS=(
   "Data Disk Used Burst IO Credits Percentage"
   "Data Disk Read Operations/Sec"
   "Data Disk Write Operations/Sec"
   "Data Disk IOPS Consumed Percentage"
+  "CPU Credits Remaining"
+  "Percentage CPU"
 )
 PAAS_BURN_IN_METRICS=(
   "cpu_credits_remaining"
+  "cpu_percent"
   "iops"
   "read_iops"
   "write_iops"

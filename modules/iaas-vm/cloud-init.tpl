@@ -31,12 +31,15 @@ runcmd:
   - pg_dropcluster --stop ${postgresql_version} main || true
   - mkdir -p /mnt/pgdata/${postgresql_version}
   - chown postgres:postgres /mnt/pgdata/${postgresql_version}
-  - pg_createcluster ${postgresql_version} main --datadir=/mnt/pgdata/${postgresql_version}/main -- --auth-local=peer --auth-host=md5
+  # --data-checksums: the PaaS server runs with checksums on, and they cost
+  # CPU on every page read and write, so the IaaS cluster carries them too.
+  - pg_createcluster ${postgresql_version} main --datadir=/mnt/pgdata/${postgresql_version}/main -- --auth-local=peer --auth-host=md5 --data-checksums
   - pg_conftool ${postgresql_version} main set listen_addresses '*'
-  # Time spent in reads/writes shows up in pg_stat_io and pg_stat_database
-  # only with this on. Enabled on the PaaS arm too (modules/paas-postgres),
-  # so in-database I/O latency is comparable across both.
-  - pg_conftool ${postgresql_version} main set track_io_timing on
+  # Engine configuration carried over from the PaaS reference server (see
+  # postgresql_settings in variables.tf), applied before the first start.
+%{ for name, value in postgresql_settings ~}
+  - pg_conftool ${postgresql_version} main set ${name} ${value}
+%{ endfor ~}
   - echo "host all all ${allowed_client_address_space} md5" >> /etc/postgresql/${postgresql_version}/main/pg_hba.conf
   - systemctl restart postgresql
   # The password is pasted verbatim into a double-quoted shell string (runcmd
