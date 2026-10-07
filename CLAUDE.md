@@ -114,6 +114,16 @@ Wyniki tego przebiegu (i pilotażu 128 GB z Fazy 1) są w `results/_archive/` �
 - `vm_uncached_iops_consumed_pct_max` = 86% — limit VM (3750 IOPS) nieosiągnięty nawet w burście, co potwierdza wybór 512 GB.
 - Latencja dysku z Azure Monitor (`disk_latency_ms_avg`) = 7,51 ms; kolumna wypełnia się, więc jest teraz wymagana.
 
+## Sanity check `paas-burstable` (2026-10-07) — zatrzymany przed pomiarem
+
+Łańcuch: apply → `init-db.sh` (**25 min 6 s** — ~3,5× dłużej niż GP/IaaS: generowanie danych 826 s, klucze główne 644 s, vacuum 35 s; 14,6 GiB) → burn-in 60 min (233,9 TPS, 106,9 ms, 0 nieudanych) → **zatrzymany na granicy burn-in/pomiar** (pgbench warm-upu zabity 4 s po starcie), bo `cpu_credits_remaining` po 60 min nie zbliżało się do zera. Przebiegu pomiarowego nie ma.
+
+- **Kredyty CPU:** 29 na starcie serwera, 27 na początku burn-inu → **18 po 60 min** (~0,15/min przy CPU 31–38%). Do zera brakowałoby jeszcze ~2 h obciążenia.
+- **Burst I/O po stronie obliczeniowej, niewidoczny w metrykach kredytów:** przez pierwsze ~30 min obciążenia IOPS stały płasko na **~1018**, o 12:41 spadły skokowo do **~810** i tak zostały do końca; TPS ~255 → ~212, latencja ~98 → ~118 ms (log `-P 60` burn-inu). Płaskie plateau i skok po ~30 min pasują do kredytowego limitu I/O; Flexible Server nie publikuje dla niego metryki. Katalogowe 640 IOPS z `list-skus` nie odpowiada żadnemu z poziomów. 60-minutowy burn-in ten burst drenuje.
+- `disk_iops_consumed_percentage` ≈ `write_iops` / 2300 (22% → 16%), jak na GP — dysk P20 nie jest wąskim gardłem, ogranicza warstwa obliczeniowa.
+- **[DECYZJA] Kryterium stanu ustalonego dla B1ms** — do ustalenia przed pilotażem, na podstawie tej krzywej.
+- Wyniki: `results/paas-burstable/` (burn-in z `burnin-metrics.txt` i logiem `-P 60`, `init-*.env`).
+
 ## Parytet konfiguracji PostgreSQL
 
 Punkt odniesienia: `pg_settings` serwera PaaS `GP_Standard_D2s_v3` (te same 2 vCPU / 8 GiB co `Standard_B2s_v2`). Na IaaS przeniesiony jest **każdy parametr wpływający na wydajność** (pamięć, WAL, checkpointy, autovacuum, koszty planera, zapis w tle) — w `modules/iaas-vm`, zmienna `postgresql_settings`, ustawiana przez `pg_conftool` w cloud-init przed pierwszym startem, plus `--data-checksums` w `pg_createcluster`. Nie przenosimy parametrów specyficznych dla Azure, logowania, certyfikatów ani rozszerzeń. Zrzut `pg_settings` na IaaS przy sanity checku ma potwierdzić, że wartości faktycznie się zastosowały. Kolumna "IaaS domyślnie" = PostgreSQL 16 na Ubuntu 24.04 bez strojenia.
