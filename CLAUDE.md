@@ -297,7 +297,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
 - **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
-- Faza 3: pilotaż (5×4 przebiegi) → wyliczenie N
+- **Faza 3 — W TOKU (start 2026-10-07)**: pilotaż (5×4 przebiegi) → wyliczenie N. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
 - Faza 4: właściwe pomiary (N×4, randomizacja)
 - Faza 5: analiza wyników + rozdział 5
 - Faza 6: rozdział 6 (wnioski)
