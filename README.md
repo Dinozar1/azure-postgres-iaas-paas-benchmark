@@ -46,7 +46,7 @@ key `~/.ssh/id_rsa_pgbench`. `bootstrap/` must have been applied once. Copy
 terraform -chdir=environments/<env> init
 terraform -chdir=environments/<env> apply
 scripts/init-db.sh <env>                 # pgbench -i -s 1000, once per environment
-scripts/run-benchmark.sh <env> --burn-in # 35-min burn-in, then the first measured run
+scripts/run-benchmark.sh <env> --burn-in # 60-min burn-in, then the first measured run
 scripts/run-benchmark.sh <env>           # each further repetition
 scripts/teardown.sh <env>                # collect metrics, archive results, terraform destroy
 ```

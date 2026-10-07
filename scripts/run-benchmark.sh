@@ -8,7 +8,7 @@
 # Usage: run-benchmark.sh <environment> [--burn-in]
 #
 # --burn-in precedes the repetition with one continuous pgbench of
-# BURN_IN_SECONDS (35 min) — no warm-up, no per-transaction log, no reset —
+# BURN_IN_SECONDS (60 min) — no warm-up, no per-transaction log, no reset —
 # and goes straight on into the repetition. Use it for the first repetition
 # after init-db.sh: a freshly created disk starts with a full burst-credit
 # pool, so the first sustained load measures a bursting disk rather than the
@@ -18,7 +18,9 @@
 # SSD E20 refills completely in about 6 minutes). So the per-minute report on
 # the burn-in window — credits, IOPS, CPU — is produced in the background once
 # Azure Monitor has ingested its last minutes, saved to burnin-metrics.txt and
-# printed at the end. collect-results.sh skips burn-in runs.
+# printed at the end. The burn-in's own -P 60 progress log (summary.txt in its
+# directory) is kept: it is the data on the bursting phase itself.
+# collect-results.sh skips burn-in runs.
 #
 # Around the measured run (immediately before and after it) the script
 # snapshots pg_stat_io, pg_stat_database and pg_stat_bgwriter, and once per run

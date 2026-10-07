@@ -10,11 +10,13 @@ PGBENCH_JOBS=2
 PROGRESS_INTERVAL=60
 DB_PORT=5432
 
-# Length of the --burn-in load. One standard run (~14 min of load including the
-# warm-up) does not drain the data disk's burst-credit pool: the pool lasts
-# ~30 min at full burst, and the first trial run used only 17% of it in 12 min.
-# 35 minutes of continuous load does.
-BURN_IN_SECONDS=2100
+# Length of the --burn-in load, the same on all four configurations. One
+# standard run (~14 min of load) does not drain a data disk's burst-credit
+# pool, and neither did 35 minutes: the pool is sized for 30 min at the full
+# burst rate, but this workload bursts below that rate, so the excess over the
+# baseline is smaller and the pool lasts longer — a Premium P20 ran dry only
+# after ~46 min (sanity check 2026-10-07). 60 minutes leaves a margin.
+BURN_IN_SECONDS=3600
 
 # How long Azure Monitor takes to make a platform metric queryable. A query
 # over a window that ended more recently than this can come back partially
@@ -261,6 +263,41 @@ PAAS_BURN_IN_METRICS=(
   "write_iops"
   "disk_iops_consumed_percentage"
 )
+
+# --- Steady-state criterion (CLAUDE.md, "Kryterium ważności przebiegu") ------
+#
+# Fixed before the pilot. A run that fails it stays in summary.csv, flagged
+# steady_state=false; the analysis excludes it and reports it separately. The
+# thresholds may be revised only on the evidence of a burn-in's credit curve,
+# never on TPS results.
+STEADY_DISK_BURST_IO_PCT_MIN=99 # IaaS: disk pool spent, disk_burst_io_pct_min >= this
+STEADY_CPU_CREDITS_MIN=0        # IaaS: CPU not throttled, cpu_credits_remaining_min > this
+
+# steady_state <environment> [column=value ...]
+#
+# Prints, from a run's metric columns: true / false for an environment with a
+# criterion; n/a for one that needs none (paas-general-purpose, where the disk
+# is not the bottleneck); pending for one whose criterion is not set yet
+# (paas-burstable, until its sanity check); nothing when the metrics the
+# criterion needs are missing, so it cannot be judged.
+steady_state() {
+  local env="$1" burst="" credits="" kv
+  shift
+  for kv in "$@"; do
+    case "$kv" in
+    disk_burst_io_pct_min=*) burst="${kv#*=}" ;;
+    cpu_credits_remaining_min=*) credits="${kv#*=}" ;;
+    esac
+  done
+  case "$env" in
+  iaas-*)
+    [ -n "$burst" ] && [ -n "$credits" ] || return 0
+    awk -v b="$burst" -v c="$credits"       -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_CPU_CREDITS_MIN"       'BEGIN { print (b >= bt && c > ct) ? "true" : "false" }'
+    ;;
+  paas-general-purpose) echo "n/a" ;;
+  paas-burstable) echo "pending" ;;
+  esac
+}
 
 # Prints "iaas" or "paas" for a metrics resource id.
 resource_kind() {

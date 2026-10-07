@@ -2,6 +2,8 @@
 # Aggregates the per-run output pulled locally by run-benchmark.sh
 # (results/<environment>/<run-id>/) into results/<environment>/summary.csv,
 # one row per measured run:
+#   - steady_state: whether the run meets the environment's steady-state
+#     criterion (lib/common.sh, steady_state); failing runs are kept, flagged
 #   - pgbench throughput and latency (summary.txt)
 #   - latency percentiles, failed transactions and TPS in the first vs last
 #     3 minutes, from the per-transaction log (scripts/lib/run_stats.py)
@@ -111,7 +113,7 @@ load_metrics() {
 
 CSV="$RESULTS_DIR/summary.csv"
 {
-  printf 'run_id,measure_start,idle_gap_s,tps,latency_avg_ms'
+  printf 'run_id,measure_start,steady_state,idle_gap_s,tps,latency_avg_ms'
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$STATS_COLUMNS"
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$METRIC_COLUMNS"
   printf '\n'
@@ -168,8 +170,12 @@ for run_dir in "$RESULTS_DIR"/*/; do
     echo "WARNING: $run_id predates metric collection, metrics left empty" >&2
   fi
 
+  steady="$(steady_state "$ENV_NAME" \
+    "disk_burst_io_pct_min=${metric_values[disk_burst_io_pct_min]-}" \
+    "cpu_credits_remaining_min=${metric_values[cpu_credits_remaining_min]-}")"
+
   {
-    printf '%s,%s,%s,%s,%s' "$run_id" "$measure_start" "$idle_gap" "$tps" "$latency"
+    printf '%s,%s,%s,%s,%s,%s' "$run_id" "$measure_start" "$steady" "$idle_gap" "$tps" "$latency"
     while read -r col; do
       [ -n "$col" ] && printf ',%s' "$(csv_field "${stat_values[$col]-}")"
     done <<<"$STATS_COLUMNS"
