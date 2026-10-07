@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 # Aggregates the per-run output pulled locally by run-benchmark.sh
-# (results/<environment>/<run-id>/) into results/<environment>/summary.csv:
-# pgbench throughput and latency, plus the Azure Monitor metrics that say
-# whether the run was taken in a bursting or a steady state.
+# (results/<environment>/<run-id>/) into results/<environment>/summary.csv,
+# one row per measured run:
+#   - pgbench throughput and latency (summary.txt)
+#   - latency percentiles, failed transactions and TPS in the first vs last
+#     3 minutes, from the per-transaction log (scripts/lib/run_stats.py)
+#   - cache hit ratio, data-file I/O and checkpoints, from the pg_stat_*
+#     snapshots around the measured run
+#   - Azure Monitor metrics over the measured window: the USOS metrics (IOPS,
+#     CPU, memory) plus the credit balances that say whether the run was taken
+#     in a bursting or a steady state
 #
 # Usage: collect-results.sh <environment>
 #
-# RUN THIS BEFORE terraform destroy. Azure serves no metrics for a deleted
-# resource, so once the environment is gone the credit/CPU columns can never be
-# filled in for those runs — the pgbench numbers survive, the context does not.
+# RUN THIS BEFORE terraform destroy (teardown.sh does). Azure serves no metrics
+# for a deleted resource, so once the environment is gone the metric columns
+# can never be filled in for runs not yet collected — the pgbench numbers
+# survive, the context does not. Once a run's metrics are complete and older
+# than the ingestion lag, they are cached in its metrics.env (with the raw
+# per-minute series in azure-metrics.json) and never re-fetched, so collecting
+# again after a later session's environment is gone loses nothing.
 #
 # Runs recorded with --burn-in are skipped: they exist to drain disk burst
 # credits, not to be measured.
-#
-# Waiting a few minutes after the last run before collecting is fine and even
-# preferable — Azure Monitor ingestion lags by a couple of minutes, so a
-# too-eager query can return a partially filled window.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
@@ -35,7 +42,7 @@ fi
 METRIC_COLUMNS=""
 shopt -s nullglob
 for meta in "$RESULTS_DIR"/*/meta.env; do
-  rid="$(grep -E '^METRICS_RESOURCE_ID=' "$meta" | cut -d= -f2-)"
+  rid="$(env_get "$meta" METRICS_RESOURCE_ID)"
   if [ -n "$rid" ]; then
     METRIC_COLUMNS="$(metric_columns_for "$rid" || true)"
     break
@@ -44,13 +51,68 @@ done
 
 if [ -z "$METRIC_COLUMNS" ]; then
   echo "NOTE: no run under $RESULTS_DIR recorded a metrics resource id, so the" >&2
-  echo "      CSV carries pgbench columns only. Runs made before metric" >&2
+  echo "      CSV carries no Azure Monitor columns. Runs made before metric" >&2
   echo "      collection existed, or after terraform destroy, look like this." >&2
 fi
 
+STATS_COLUMNS="$(python3 "$SCRIPT_DIR/lib/run_stats.py" --header)"
+
+# Quotes a CSV field only when it has to (server_version strings, mostly).
+csv_field() {
+  local v="$1"
+  if [[ "$v" == *[,\"]* ]]; then
+    printf '"%s"' "${v//\"/\"\"}"
+  else
+    printf '%s' "$v"
+  fi
+}
+
+# Loads a run's metric columns into the metric_values array: from the cache
+# when it covers every current column, otherwise from Azure Monitor (cached
+# only when complete and past the ingestion lag, so a partial or premature
+# read is retried next time instead of frozen).
+load_metrics() {
+  local run_dir="$1" rid="$2" start="$3" end="$4"
+  local cache="${run_dir}metrics.env" col val complete=true
+
+  if [ -f "$cache" ]; then
+    local cached_all=true
+    while read -r col; do
+      [ -n "$col" ] || continue
+      grep -qE "^${col}=" "$cache" || cached_all=false
+    done <<<"$METRIC_COLUMNS"
+    if $cached_all; then
+      while IFS='=' read -r col val; do
+        [ -n "$col" ] && metric_values["$col"]="$val"
+      done <"$cache"
+      return 0
+    fi
+  fi
+
+  local fetched
+  fetched="$(fetch_metrics "$rid" "$start" "$end" "${run_dir}azure-metrics.json")"
+  while IFS='=' read -r col val; do
+    [ -n "$col" ] && metric_values["$col"]="$val"
+  done <<<"$fetched"
+
+  while read -r col; do
+    [ -n "$col" ] || continue
+    [ -n "${metric_values[$col]-}" ] || complete=false
+  done < <(metric_required_columns_for "$rid")
+
+  local settled=$(($(date +%s) - $(iso_to_epoch "$end") >= METRIC_INGESTION_LAG_SECONDS))
+  if $complete && [ "$settled" -eq 1 ]; then
+    printf '%s\n' "$fetched" >"$cache"
+  elif [ "$settled" -eq 0 ]; then
+    echo "WARNING: $(basename "$run_dir") ended less than ${METRIC_INGESTION_LAG_SECONDS}s ago;" \
+      "its metrics may be partially ingested and will be re-fetched next time" >&2
+  fi
+}
+
 CSV="$RESULTS_DIR/summary.csv"
 {
-  printf 'run_id,tps,latency_avg_ms'
+  printf 'run_id,measure_start,idle_gap_s,tps,latency_avg_ms'
+  while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$STATS_COLUMNS"
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$METRIC_COLUMNS"
   printf '\n'
 } >"$CSV"
@@ -63,12 +125,9 @@ for run_dir in "$RESULTS_DIR"/*/; do
   summary_file="${run_dir}summary.txt"
   [ -f "$summary_file" ] || continue
 
+  meta="${run_dir}meta.env"
   burn_in=false
-  metrics_resource_id=""
-  if [ -f "${run_dir}meta.env" ]; then
-    grep -qE '^BURN_IN=true$' "${run_dir}meta.env" && burn_in=true
-    metrics_resource_id="$(grep -E '^METRICS_RESOURCE_ID=' "${run_dir}meta.env" | cut -d= -f2-)"
-  fi
+  [ "$(env_get "$meta" BURN_IN)" = true ] && burn_in=true
   # Older runs predate meta.env; fall back to the directory naming convention.
   [[ "$run_id" == burnin-* ]] && burn_in=true
 
@@ -86,35 +145,42 @@ for run_dir in "$RESULTS_DIR"/*/; do
     continue
   fi
 
+  measure_start="$(env_get "${run_dir}window.env" MEASURE_START)"
+  measure_end="$(env_get "${run_dir}window.env" MEASURE_END)"
+  idle_gap="$(env_get "$meta" IDLE_GAP_S)"
+  metrics_resource_id="$(env_get "$meta" METRICS_RESOURCE_ID)"
+
+  declare -A stat_values=()
+  while IFS='=' read -r col val; do
+    [ -n "$col" ] && stat_values["$col"]="$val"
+  done < <(python3 "$SCRIPT_DIR/lib/run_stats.py" "$run_dir" ||
+    echo "WARNING: run_stats.py failed for $run_id, its columns left empty" >&2)
+
   # Metric values, keyed by CSV column, for this run's measured window.
   declare -A metric_values=()
-  if [ -n "$metrics_resource_id" ] && [ -f "${run_dir}window.env" ]; then
-    measure_start=""
-    measure_end=""
-    # shellcheck disable=SC1091
-    source "${run_dir}window.env"
-    if [ -n "${MEASURE_START:-}" ] && [ -n "${MEASURE_END:-}" ]; then
-      while IFS='=' read -r col val; do
-        [ -n "$col" ] && metric_values["$col"]="$val"
-      done < <(fetch_metrics "$metrics_resource_id" "$MEASURE_START" "$MEASURE_END")
+  if [ -n "$metrics_resource_id" ]; then
+    if [ -n "$measure_start" ] && [ -n "$measure_end" ]; then
+      load_metrics "$run_dir" "$metrics_resource_id" "$measure_start" "$measure_end"
     else
       echo "WARNING: $run_id has no measured window recorded, metrics left empty" >&2
     fi
-    unset MEASURE_START MEASURE_END
   elif [ -n "$METRIC_COLUMNS" ]; then
     echo "WARNING: $run_id predates metric collection, metrics left empty" >&2
   fi
 
   {
-    printf '%s,%s,%s' "$run_id" "$tps" "$latency"
+    printf '%s,%s,%s,%s,%s' "$run_id" "$measure_start" "$idle_gap" "$tps" "$latency"
     while read -r col; do
-      [ -n "$col" ] && printf ',%s' "${metric_values[$col]-}"
+      [ -n "$col" ] && printf ',%s' "$(csv_field "${stat_values[$col]-}")"
+    done <<<"$STATS_COLUMNS"
+    while read -r col; do
+      [ -n "$col" ] && printf ',%s' "$(csv_field "${metric_values[$col]-}")"
     done <<<"$METRIC_COLUMNS"
     printf '\n'
   } >>"$CSV"
 
   counted=$((counted + 1))
-  unset metric_values
+  unset stat_values metric_values
 done
 
 echo "Written: $CSV ($counted runs in the dataset, $skipped skipped)"

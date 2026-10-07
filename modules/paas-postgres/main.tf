@@ -24,6 +24,15 @@ resource "azurerm_postgresql_flexible_server" "this" {
   }
 }
 
+# Time spent in reads/writes shows up in pg_stat_io and pg_stat_database only
+# with this on. Set on the IaaS arm too (modules/iaas-vm/cloud-init.tpl), so
+# in-database I/O latency is comparable across both.
+resource "azurerm_postgresql_flexible_server_configuration" "track_io_timing" {
+  name      = "track_io_timing"
+  server_id = azurerm_postgresql_flexible_server.this.id
+  value     = "on"
+}
+
 resource "azurerm_postgresql_flexible_server_firewall_rule" "allowed_clients" {
   for_each = { for idx, ip in var.allowed_client_ip_addresses : idx => ip }
 

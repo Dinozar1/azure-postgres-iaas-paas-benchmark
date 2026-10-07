@@ -33,7 +33,17 @@ runcmd:
   - chown postgres:postgres /mnt/pgdata/${postgresql_version}
   - pg_createcluster ${postgresql_version} main --datadir=/mnt/pgdata/${postgresql_version}/main -- --auth-local=peer --auth-host=md5
   - pg_conftool ${postgresql_version} main set listen_addresses '*'
+  # Time spent in reads/writes shows up in pg_stat_io and pg_stat_database
+  # only with this on. Enabled on the PaaS arm too (modules/paas-postgres),
+  # so in-database I/O latency is comparable across both.
+  - pg_conftool ${postgresql_version} main set track_io_timing on
   - echo "host all all ${allowed_client_address_space} md5" >> /etc/postgresql/${postgresql_version}/main/pg_hba.conf
   - systemctl restart postgresql
+  # The password is pasted verbatim into a double-quoted shell string (runcmd
+  # entries run through sh -c) around a single-quoted SQL literal: $ ` " \
+  # alter or break the shell command and ' ends the SQL literal early. Unquoted
+  # YAML adds ": " and " #" to that list. Keep this password alphanumeric, e.g.
+  # openssl rand -hex 24. Not for the PaaS tfvars, though: Flexible Server
+  # demands 3 of 4 character classes, which hex output does not have.
   - sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${postgres_admin_password}';"
   - sudo -u postgres createdb pgbench_db

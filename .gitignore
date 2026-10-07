@@ -43,6 +43,10 @@ terraform.rc
 # Uncomment the line below if you want to ignore planout files.
 # planout
 
-# Raw benchmark output pulled by scripts/run-benchmark.sh — regenerable data,
-# not source. Commit derived summary CSVs/analysis separately if needed.
-results/
+# Raw benchmark output pulled by scripts/run-benchmark.sh — bulky, and archived
+# to the "results" storage container by scripts/teardown.sh. The per-environment
+# summary.csv (one row per measured run) is the exception: it is the dataset
+# the thesis analysis works from, so it is versioned.
+results/**
+!results/*/
+!results/*/summary.csv

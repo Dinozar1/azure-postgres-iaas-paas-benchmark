@@ -61,12 +61,15 @@ Stąd wybór 512 GB:
 
 Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu zależy od stanu **sprzed** jego rozpoczęcia. Zmierzone w pierwszym przebiegu testowym (Azure Monitor, VM bazy):
 
-- **Kredyty burst dysku: realny problem.** `Data Disk Used Burst IO Credits Percentage` rosło 0% → 9% → 17% w trakcie 12-minutowego pomiaru. Dysk startuje z pełną pulą kredytów, zużywa je pod obciążeniem i odbudowuje w bezczynności — więc pierwszy przebieg po utworzeniu środowiska mierzy dysk *burstujący*, a nie stan ustalony danego tieru. **Dlatego `run-benchmark.sh --burn-in`**: jeden pełny przebieg nieliczony do wyników, który drenuje pulę przed właściwymi pomiarami. Konsekwencja dla Fazy 4: *odstęp między przebiegami wpływa na stan kredytów*, więc trzeba go raportować.
-- **Kredyty CPU: dużo mniej istotne, niż zakładano.** `Percentage CPU` na VM bazy wynosiło **~9–10%**, a `CPU Credits Remaining` **rosło** (76 → 79) w trakcie pomiaru. Obciążenie jest I/O-bound, więc model kredytowy CPU `B2s_v2` praktycznie nie działa jako ograniczenie — to koryguje wcześniejsze założenie, że throttling CPU będzie głównym zagrożeniem trafności przy zamianie `D2s_v5` → `B2s_v2`. Nadal warto to raportować, ale jako zweryfikowane i odrzucone, nie jako domniemane.
+- **Kredyty burst dysku: realny problem.** `Data Disk Used Burst IO Credits Percentage` rosło 0% → 9% → 17% w trakcie 12-minutowego pomiaru. Dysk startuje z pełną pulą kredytów, zużywa je pod obciążeniem i odbudowuje w bezczynności — więc pierwszy przebieg po utworzeniu środowiska mierzy dysk *burstujący*, a nie stan ustalony danego tieru.
+  - **Jeden standardowy przebieg NIE drenuje puli.** ~14 min obciążenia (warm-up + pomiar) to za mało: pula wystarcza na ~30 min przy maksymalnym burście, a pierwszy test zużył 17% na 12 min.
+  - **Protokół `run-benchmark.sh --burn-in`** (raz po `init-db.sh`, nieliczony do wyników): ciągły `pgbench -T 2100` (35 min) — bez warm-upu, bez `-l`, bez VACUUM — potem odczekanie lagu ingestii Azure Monitor (300 s) i wypisanie `Data Disk Used Burst IO Credits Percentage` (zapis w `burnin-credits.txt`), jako dowód, że pula jest pusta przed pomiarami.
+  - Per przebieg: `disk_burst_io_pct_min` (stan puli na początku okna pomiaru) i `disk_burst_io_pct_max` (na końcu) w CSV; w `meta.env` `PREV_RUN_END` (koniec poprzedniego obciążenia — przebiegu, burn-inu albo `init-db.sh`) i `IDLE_GAP_S`. Konsekwencja dla Fazy 4: *odstęp między przebiegami wpływa na stan kredytów*, więc jest raportowany (kolumna `idle_gap_s`).
+- **Kredyty CPU: dużo mniej istotne, niż zakładano — zweryfikowane dla Standard SSD 128 GB, do sprawdzenia na Premium 512 GB.** Pierwszy test szedł jeszcze na dysku 128 GB (500 IOPS); na Premium P20 (2300 IOPS) dysk mniej dławi przepustowość, więc CPU wykonuje więcej pracy na sekundę i wniosek może nie przetrwać. `Percentage CPU` na VM bazy wynosiło **~9–10%**, a `CPU Credits Remaining` **rosło** (76 → 79) w trakcie pomiaru. Obciążenie jest I/O-bound, więc model kredytowy CPU `B2s_v2` praktycznie nie działa jako ograniczenie — to koryguje wcześniejsze założenie, że throttling CPU będzie głównym zagrożeniem trafności przy zamianie `D2s_v5` → `B2s_v2`. Nadal warto to raportować, ale jako zweryfikowane (na razie dla jednej konfiguracji), nie jako domniemane.
 - **VM-klient nie jest wąskim gardłem:** CPU ~3%, co potwierdza sens odseparowanej maszyny klienckiej.
 - Tier Burstable Flexible Servera (wariant 3) mierzy CPU na kredytach analogicznie — do sprawdzenia przy pierwszym wdrożeniu PaaS.
 
-`collect-results.sh` pobiera te metryki z Azure Monitor dla **okna czasowego samego pomiaru** (bez warm-upu i vacuum) i zapisuje obok wyników pgbench, żeby analiza mogła pokazać, czy dany przebieg był w stanie burstującym czy ustalonym. **Musi być uruchomiony przed `terraform destroy`** — Azure nie udostępnia metryk usuniętego zasobu.
+`collect-results.sh` pobiera te metryki z Azure Monitor dla **okna czasowego samego pomiaru** (bez warm-upu i vacuum) i zapisuje obok wyników pgbench, żeby analiza mogła pokazać, czy dany przebieg był w stanie burstującym czy ustalonym. **Musi być uruchomiony przed `terraform destroy`** — Azure nie udostępnia metryk usuniętego zasobu. W praktyce robi to `teardown.sh` (patrz niżej), który odmawia `destroy`, dopóki wymagane kolumny metryk ostatniego przebiegu są puste. Metryki kompletne i starsze niż lag ingestii są cache'owane per przebieg (`metrics.env` + surowe minutowe serie w `azure-metrics.json`), więc ponowne `collect-results.sh` po zniszczeniu środowiska ich nie traci.
 
 **Ważne:** dokładne nazwy SKU dla Flexible Server bywają zależne od regionu — zawsze zweryfikuj przed `apply`:
 `az postgres flexible-server list-skus --location belgiumcentral`
@@ -74,6 +77,7 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 ## Architektura testowa
 - **Osobna mała VM-klient** (`Standard_B2s_v2`) uruchamia pgbench — celowo odseparowana od serwera bazy, żeby nie zaburzać pomiaru CPU/RAM serwera (kluczowa metryka z USOS)
 - Ta sama VM-klient używana dla wszystkich 4 konfiguracji
+- **Ubuntu 24.04 (noble) na obu VM = parytet wersji PostgreSQL 16 z PaaS.** Repozytoria 22.04 (jammy) mają PostgreSQL 14 — cloud-init z `postgresql-16` w ogóle nie postawiłby bazy, a nawet z 14 porównanie IaaS vs PaaS mieszałoby wersję silnika z modelem wdrożenia. Noble ma 16 natywnie, tak jak Flexible Server (`version = 16`). Klient przypięty do `postgresql-16`, żeby pgbench miał tę samą wersję główną.
 
 ## Historia decyzji: region i rozmiar VM
 
@@ -87,11 +91,13 @@ Pierwotny plan (`polandcentral` + `Standard_D2s_v5`) okazał się niewykonalny n
 Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla subskrypcji promocyjnych/studenckich nie jest w pełni przewidywalna z dokumentacji ani z komend informacyjnych — wymaga systematycznej, empirycznej weryfikacji (realny apply/destroy), nie tylko sprawdzenia quoty.
 
 ## Parametry pgbench (ustalone)
-- Scale factor: **1000** (~15 GB bazy — celowo > 8 GB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache)
+- Scale factor: **1000** (**13 GB** bazy — zmierzone po `pgbench -i` w pierwszym teście; celowo > 8 GB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache). `init-db.sh` zapisuje rozmiar i czas inicjalizacji w `results/<env>/init-*.env`.
 - Warm-up: 2 min, nieliczone do wyników
 - Pomiar właściwy: 12 min → `pgbench -c 25 -j 2 -T 720 -P 60 -l`
 - Klienci: `-c 25 -j 2`
-- Reset stanu: `VACUUM ANALYZE` po każdym powtórzeniu w obrębie tej samej konfiguracji; pełna reinicjalizacja (`pgbench -i -s 1000`) tylko przy zmianie konfiguracji
+- Reset stanu: `TRUNCATE pgbench_history` + `VACUUM ANALYZE` po każdym powtórzeniu w obrębie tej samej konfiguracji; pełna reinicjalizacja (`pgbench -i -s 1000`) tylko przy zmianie konfiguracji
+- Burn-in: ciągły `pgbench -T 2100` raz po inicjalizacji, nieliczony (patrz "Bursting jako czynnik zakłócający")
+- Pomiar z wnętrza PostgreSQL (te same zapytania na IaaS i PaaS): snapshoty `pg_stat_io`, `pg_stat_database` (`pgbench_db`) i `pg_stat_bgwriter` tuż przed i tuż po pomiarze właściwym; raz na przebieg `version()` i `pg_stat_ssl` dla własnego połączenia. `track_io_timing = on` na obu ramionach (IaaS: `pg_conftool` w cloud-init, PaaS: `azurerm_postgresql_flexible_server_configuration`)
 
 ## Plan statystyczny
 1. Pilotaż: 5 przebiegów na każdą z 4 konfiguracji → policz odchylenie standardowe TPS/latencji
@@ -130,16 +136,21 @@ azure-postgres-iaas-paas-benchmark/
 ├── scripts/
 │   ├── lib/common.sh              # wspólna konfiguracja (parametry pgbench, SSH, .pgpass) + helpery
 │   ├── init-db.sh <env>           # pgbench -i -s 1000 (raz na środowisko, przed pierwszym run-benchmark.sh)
-│   ├── run-benchmark.sh <env>     # warm-up + pomiar 12min + VACUUM ANALYZE; ściąga wyniki do results/
-│   └── collect-results.sh <env>   # agreguje results/<env>/*/summary.txt → results/<env>/summary.csv
-├── results/                      # (gitignored) surowe wyniki pgbench per przebieg, ściągane z VM-klienta
+│   ├── run-benchmark.sh <env>     # warm-up + pomiar 12min + snapshoty pg_stat_* + TRUNCATE/VACUUM ANALYZE;
+│   │                              # --burn-in: ciągłe 35 min; ściąga wyniki do results/
+│   ├── collect-results.sh <env>   # agreguje results/<env>/<run>/ → results/<env>/summary.csv
+│   ├── teardown.sh <env>          # collect → check metryk → gzip → upload → terraform destroy
+│   └── lib/run_stats.py           # percentyle latencji, TPS 3 min, delty pg_stat_* (dla collect-results)
+├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
 └── .github/workflows/             # opcjonalnie: terraform fmt -check + validate jako CI gate
 ```
 
 ### Jak działają `scripts/*.sh`
-- Uruchamiane **lokalnie** (nie na VM), łączą się przez SSH (`~/.ssh/id_ed25519_pgbench`) do VM-klienta i tam zdalnie odpalają `pgbench`/`psql` — sama VM bazy nigdy nie jest dotykana bezpośrednio (dla IaaS: prywatny IP w tej samej podsieci; dla PaaS: publiczny FQDN Flexible Servera).
+- Uruchamiane **lokalnie** (nie na VM), łączą się przez SSH (`~/.ssh/id_rsa_pgbench` — RSA, bo provider azurerm 3.x odrzuca ed25519 w `admin_ssh_key`) do VM-klienta i tam zdalnie odpalają `pgbench`/`psql` — sama VM bazy nigdy nie jest dotykana bezpośrednio (dla IaaS: prywatny IP w tej samej podsieci; dla PaaS: publiczny FQDN Flexible Servera).
 - Hasło do bazy nigdy nie trafia do argumentów `ssh`/wiersza poleceń (ryzyko re-parsowania przez zdalną powłokę) — zamiast tego skrypt zapisuje `~/.pgpass` na VM-kliencie (`chmod 600`) przed każdym uruchomieniem, `pgbench`/`psql` czytają je automatycznie.
-- Kolejność użycia: `terraform apply` w danym `environments/<env>` → `init-db.sh <env>` (raz) → `run-benchmark.sh <env>` (N razy, per plan statystyczny) → `collect-results.sh <env>` (po serii przebiegów).
+- Kolejność użycia: `terraform apply` w danym `environments/<env>` → `init-db.sh <env>` (raz) → `run-benchmark.sh <env> --burn-in` (raz) → `run-benchmark.sh <env>` (N razy, per plan statystyczny) → `teardown.sh <env>`.
+- `teardown.sh` kończy sesję w jedynej kolejności, która nic nie gubi: odczekuje lag ingestii → `collect-results.sh` → sprawdza, że ostatni przebieg ma wypełnione wymagane kolumny metryk (inaczej przerywa **przed** `destroy`; `--force` świadomie to pomija) → gzip surowych logów `-l` → upload `results/<env>/` do kontenera `results` w `sttfstatepgbench01` → `terraform destroy -auto-approve` → sprawdzenie, że resource group zniknęła. Nieudany upload nie blokuje `destroy` (dane zostają lokalnie; zostawienie środowiska jest droższą porażką).
+- `summary.csv` (jeden wiersz na przebieg pomiarowy): TPS, średnia latencja, p50/p95/p99/p99.9 latencji i liczba nieudanych transakcji (z logów `-l`), TPS z pierwszych i ostatnich 3 min (dryf, np. koniec kredytów w trakcie pomiaru), cache hit ratio, odczyty/zapisy i ich czasy z `pg_stat_io`, checkpointy timed/req, `measure_start`, `server_version`, `idle_gap_s` oraz metryki Azure Monitor (IOPS odczyt/zapis, queue depth, % zużycia IOPS dysku, CPU, pamięć, kredyty). Nazwy kolumn wspólne dla IaaS i PaaS tam, gdzie wielkość jest ta sama.
 - Login/hasło do bazy dla PaaS pobierane z outputów Terraforma (`db_admin_login`, `db_name`, `db_fqdn`) — brak zahardkodowanych wartości mogących się rozjechać z `terraform.tfvars`. Dla IaaS `postgres`/`pgbench_db` są zahardkodowane w skrypcie zgodnie z `modules/iaas-vm/cloud-init.tpl` (tam też nie są parametryzowane).
 
 Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** (backend `azurerm`, NIE Git — patrz niżej) — pozwala to na niezależne `apply`/`destroy` pojedynczego wariantu bez ryzyka dla pozostałych.
@@ -150,7 +161,7 @@ Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** 
 - **Znana granica Terraforma (do wzmianki w pracy, nie do naprawy w kodzie):** blok `terraform{}`/`provider{}` musi być zadeklarowany w każdym root module osobno (bootstrap + 4 environments = 5×) — to ograniczenie narzędzia, nie przeoczenie. To samo dotyczy `backend "azurerm" {}` (nie przyjmuje zmiennych, różni się tylko `key`).
 - **Formatowanie:** `terraform fmt -recursive` odpalane po większych zmianach, `terraform fmt -check -recursive` powinno zawsze wychodzić czysto.
 
-Storage Account pod remote state: `sttfstatepgbench01` (do potwierdzenia dostępności — nazwa musi być globalnie unikalna w Azure).
+Storage Account pod remote state: `sttfstatepgbench01` — potwierdzony (utworzony przez `bootstrap/`, trzyma stan wszystkich 4 środowisk). Kontener `results` w tym samym koncie (też z `bootstrap/`) to archiwum wyników uploadowanych przez `teardown.sh`.
 
 ## Struktura pracy (LaTeX, Overleaf)
 `main.tex` → `\input{chapters/...}`:
@@ -166,7 +177,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 
 ## Plan działania (fazy)
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
-- **Faza 1 — PRAWIE ZAMKNIĘTA**: moduły Terraform napisane, zrefaktoryzowane (base module + kompozycje), sformatowane (`fmt` czyste), zwalidowane (`terraform validate` OK na wszystkich 4 environments). `bootstrap/` zaaplikowany (remote state istnieje). `scripts/*.sh` napisane i sprawdzone składniowo/logicznie (dry-run lokalny z podstawionymi `pgbench`/`psql`), ale **jeszcze bez realnego przebiegu end-to-end** — świadomie odłożone do momentu pierwszego `terraform apply` na środowisku. Zostało: pierwszy realny `terraform apply` na jednym środowisku + pierwszy prawdziwy przebieg `init-db.sh`/`run-benchmark.sh` jako potwierdzenie end-to-end.
+- **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog `results/iaas-standard-ssd/20260927T144916Z/` trzeba usunąć lub przenieść przed pomiarami na tym środowisku, inaczej `collect-results.sh` wliczy go do `summary.csv`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - Faza 3: pilotaż (5×4 przebiegi) → wyliczenie N
 - Faza 4: właściwe pomiary (N×4, randomizacja)

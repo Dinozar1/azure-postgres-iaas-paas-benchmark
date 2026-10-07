@@ -49,3 +49,6 @@ jobs:
             echo "-- $f"
             bash -n "$f"
           done
+
+      - name: python syntax
+        run: python3 -m py_compile scripts/lib/*.py

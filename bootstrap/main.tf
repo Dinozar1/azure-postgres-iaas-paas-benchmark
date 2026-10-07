@@ -80,6 +80,15 @@ resource "azurerm_storage_container" "tfstate" {
   container_access_type = "private"
 }
 
+# Archive for benchmark results: scripts/teardown.sh uploads results/<env>/
+# here (gzipped raw logs, per-run metadata, summary.csv) before it destroys an
+# environment, so the raw data outlives the local copy.
+resource "azurerm_storage_container" "results" {
+  name                  = "results"
+  storage_account_name  = azurerm_storage_account.tfstate.name
+  container_access_type = "private"
+}
+
 output "resource_group_name" {
   value = azurerm_resource_group.tfstate.name
 }

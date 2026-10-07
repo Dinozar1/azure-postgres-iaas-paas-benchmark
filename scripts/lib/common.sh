@@ -10,6 +10,17 @@ PGBENCH_JOBS=2
 PROGRESS_INTERVAL=60
 DB_PORT=5432
 
+# Length of the --burn-in load. One standard run (~14 min of load including the
+# warm-up) does not drain the data disk's burst-credit pool: the pool lasts
+# ~30 min at full burst, and the first trial run used only 17% of it in 12 min.
+# 35 minutes of continuous load does.
+BURN_IN_SECONDS=2100
+
+# How long Azure Monitor takes to make a platform metric queryable. A query
+# over a window that ended more recently than this can come back partially
+# filled — and a min/max/avg over a partial window is silently wrong.
+METRIC_INGESTION_LAG_SECONDS=300
+
 # RSA, not ed25519: the azurerm 3.x provider rejects ed25519 in admin_ssh_key.
 SSH_KEY="$HOME/.ssh/id_rsa_pgbench"
 SSH_USER="azureuser"
@@ -21,6 +32,12 @@ SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RESULTS_ROOT="$REPO_ROOT/results"
+
+# Archive for raw results (teardown.sh): the "results" container of the same
+# storage account that holds Terraform state, both created by bootstrap/.
+RESULTS_STORAGE_RG="rg-tfstate-pgbench"
+RESULTS_STORAGE_ACCOUNT="sttfstatepgbench01"
+RESULTS_CONTAINER="results"
 
 VALID_ENVIRONMENTS="iaas-standard-ssd iaas-premium-ssd paas-burstable paas-general-purpose"
 
@@ -50,6 +67,37 @@ tf_output() {
 tfvar() {
   local env_dir="$1" name="$2"
   grep -E "^${name}[[:space:]]*=" "$env_dir/terraform.tfvars" | sed -E 's/^[^=]+=[[:space:]]*"(.*)"[[:space:]]*$/\1/'
+}
+
+now_iso() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+iso_to_epoch() {
+  date -u -d "$1" +%s
+}
+
+# env_get <file> <key>: the value of KEY=value in one of the .env files these
+# scripts write, or empty if the file or the key is missing.
+env_get() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  grep -E "^${key}=" "$file" | tail -n1 | cut -d= -f2- || true
+}
+
+# latest_load_end <results_env_dir>: when the most recent load on this
+# environment's database ended — init-db.sh or any earlier run, burn-in
+# included — or empty if there was none. Disk credits refill only while the
+# disk idles, so the gap between this point and the next run's start decides
+# how much burst that run begins with. Timestamps are ISO 8601 UTC, so a plain
+# sort orders them chronologically; runs from an earlier, destroyed incarnation
+# of the environment always precede that incarnation's own init-db.sh.
+latest_load_end() {
+  local dir="$1"
+  {
+    grep -hE '^INIT_END=' "$dir"/init-*.env 2>/dev/null || true
+    grep -hE '^RUN_END=' "$dir"/*/window.env 2>/dev/null || true
+  } | cut -d= -f2- | sort | tail -n1
 }
 
 # Resolves DB connection target for a given environment: sets DB_HOST, DB_USER,
@@ -107,33 +155,59 @@ client_vm_scp_from() {
   scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -q -r "${SSH_USER}@${client_ip}:${remote_path}" "$local_path"
 }
 
-# --- Azure Monitor: confounding-factor metrics -------------------------------
+# --- Azure Monitor: USOS metrics and confounding factors ----------------------
 #
-# Every SKU in the experiment matrix meters something on a credit balance, so a
-# run's throughput depends on state accumulated before it started:
-#   - the data disk bursts on IO/BPS credits (full pool at creation, drains
-#     under sustained load, refills while idle) — measured at 0 -> 9 -> 17%
-#     consumed during the very first trial run, so this is real, not theoretical
-#   - Standard_B2s_v2 meters CPU on credits as well, though the first trial run
-#     showed the database VM at ~10% CPU with credits accruing, so for this
-#     I/O-bound workload CPU is not the binding constraint
-#   - the Flexible Server Burstable tier meters CPU the same way
+# Two reasons to pull platform metrics for every measured window:
 #
-# These are collected per run so the analysis can show whether a given
-# measurement was taken in a bursting or a steady state, rather than assuming.
-
-# CSV column -> "metric name|aggregation". Aggregation picks the summary that
-# matters for that quantity: worst-case remaining credit (Minimum), peak credit
-# consumption (Maximum), typical load (Average).
+# 1. The USOS description names IOPS, latency and CPU/RAM utilisation as the
+#    key metrics. pgbench gives transaction latency; the platform gives disk
+#    IOPS, queue depth, CPU and memory, as the hypervisor / managed service
+#    sees them.
+#
+# 2. Every SKU in the experiment matrix meters something on a credit balance,
+#    so a run's throughput depends on state accumulated before it started:
+#      - the data disk bursts on IO/BPS credits (full pool at creation, drains
+#        under sustained load, refills while idle) — measured at 0 -> 9 -> 17%
+#        consumed during the very first trial run, so this is real
+#      - Standard_B2s_v2 meters CPU on credits as well, though the first trial
+#        run (Standard SSD, 128 GB) showed the database VM at ~10% CPU with
+#        credits accruing — still to be confirmed on Premium 512 GB, where the
+#        faster disk lets the CPU do more work
+#      - the Flexible Server Burstable tier meters CPU the same way
+#    Collected per run, they let the analysis show whether a measurement was
+#    taken in a bursting or a steady state, rather than assume either.
+#
+# Spec line: "csv column|metric name|aggregation[|optional]". The aggregation
+# picks the summary that matters for that quantity: worst case for a remaining
+# credit or free memory (minimum), peak (maximum), typical load (average).
+# "optional" marks a column that may legitimately stay empty (a metric only
+# some tiers or VM generations publish); teardown.sh refuses to destroy an
+# environment while any other column of the latest run is still empty.
+#
+# Column names are shared between IaaS and PaaS wherever the quantity is the
+# same, so the four environments' CSVs line up in the analysis.
 IAAS_METRIC_SPEC=(
   "cpu_pct_avg|Percentage CPU|average"
   "cpu_pct_max|Percentage CPU|maximum"
   "cpu_credits_remaining_min|CPU Credits Remaining|minimum"
+  "mem_available_bytes_min|Available Memory Bytes|minimum"
+  "disk_read_iops_avg|Data Disk Read Operations/Sec|average"
+  "disk_read_iops_max|Data Disk Read Operations/Sec|maximum"
+  "disk_write_iops_avg|Data Disk Write Operations/Sec|average"
+  "disk_write_iops_max|Data Disk Write Operations/Sec|maximum"
+  "disk_queue_depth_avg|Data Disk Queue Depth|average"
+  "disk_latency_ms_avg|Data Disk Latency|average|optional"
+  "disk_iops_consumed_pct_avg|Data Disk IOPS Consumed Percentage|average"
+  "disk_iops_consumed_pct_max|Data Disk IOPS Consumed Percentage|maximum"
+  "vm_uncached_iops_consumed_pct_max|VM Uncached IOPS Consumed Percentage|maximum"
+  "disk_burst_io_pct_min|Data Disk Used Burst IO Credits Percentage|minimum"
   "disk_burst_io_pct_max|Data Disk Used Burst IO Credits Percentage|maximum"
   "disk_burst_bps_pct_max|Data Disk Used Burst BPS Credits Percentage|maximum"
 )
+# disk_burst_io_pct_min is the pool state at the start of the window (the used
+# share only grows under load), disk_burst_io_pct_max the state at its end.
 
-# Flexible Server publishes a different, lowercase metric set. These names are
+# Flexible Server publishes its own, lowercase metric set. These names are
 # the intended ones but have NOT yet been verified against a live server (no
 # PaaS environment has been deployed at the time of writing) — fetch_metrics
 # intersects this list with what the resource actually reports and warns about
@@ -143,46 +217,87 @@ IAAS_METRIC_SPEC=(
 PAAS_METRIC_SPEC=(
   "cpu_pct_avg|cpu_percent|average"
   "cpu_pct_max|cpu_percent|maximum"
-  "cpu_credits_remaining_min|cpu_credits_remaining|minimum"
+  "cpu_credits_remaining_min|cpu_credits_remaining|minimum|optional"
   "memory_pct_max|memory_percent|maximum"
   "iops_avg|iops|average"
+  "disk_read_iops_avg|read_iops|average"
+  "disk_read_iops_max|read_iops|maximum"
+  "disk_write_iops_avg|write_iops|average"
+  "disk_write_iops_max|write_iops|maximum"
+  "disk_queue_depth_avg|disk_queue_depth|average"
+  "disk_iops_consumed_pct_avg|disk_iops_consumed_percentage|average"
+  "disk_iops_consumed_pct_max|disk_iops_consumed_percentage|maximum"
   "storage_pct_max|storage_percent|maximum"
 )
 
-# Echoes the metric spec lines appropriate for a resource id.
-metric_spec_for() {
-  local resource_id="$1"
-  case "$resource_id" in
-  *"/providers/Microsoft.DBforPostgreSQL/flexibleServers/"*)
-    printf '%s\n' "${PAAS_METRIC_SPEC[@]}"
-    ;;
-  *"/providers/Microsoft.Compute/virtualMachines/"*)
-    printf '%s\n' "${IAAS_METRIC_SPEC[@]}"
-    ;;
+# Credit balances printed right after a burn-in, to show the pool really is
+# drained before the measured runs start.
+IAAS_BURN_IN_METRICS=("Data Disk Used Burst IO Credits Percentage")
+PAAS_BURN_IN_METRICS=("cpu_credits_remaining")
+
+# Prints "iaas" or "paas" for a metrics resource id.
+resource_kind() {
+  case "$1" in
+  *"/providers/Microsoft.DBforPostgreSQL/flexibleServers/"*) echo paas ;;
+  *"/providers/Microsoft.Compute/virtualMachines/"*) echo iaas ;;
   *)
-    echo "Unrecognised resource type for metrics: $resource_id" >&2
+    echo "Unrecognised resource type for metrics: $1" >&2
     return 1
     ;;
   esac
 }
 
-# fetch_metrics <resource_id> <start_iso> <end_iso>
+# Echoes the metric spec lines appropriate for a resource id.
+metric_spec_for() {
+  case "$(resource_kind "$1")" in
+  paas) printf '%s\n' "${PAAS_METRIC_SPEC[@]}" ;;
+  iaas) printf '%s\n' "${IAAS_METRIC_SPEC[@]}" ;;
+  *) return 1 ;;
+  esac
+}
+
+burn_in_metrics_for() {
+  case "$(resource_kind "$1")" in
+  paas) printf '%s\n' "${PAAS_BURN_IN_METRICS[@]}" ;;
+  iaas) printf '%s\n' "${IAAS_BURN_IN_METRICS[@]}" ;;
+  *) return 1 ;;
+  esac
+}
+
+# Column order for the aggregated CSV, per resource type.
+metric_columns_for() {
+  metric_spec_for "$1" | cut -d'|' -f1
+}
+
+# Columns that must be filled before teardown.sh may destroy the environment.
+metric_required_columns_for() {
+  metric_spec_for "$1" | awk -F'|' '$4 != "optional" { print $1 }'
+}
+
+# Names of the metrics a resource publishes, one per line; empty if none are
+# readable (e.g. the resource has been deleted).
+published_metrics() {
+  az monitor metrics list-definitions --resource "$1" \
+    --query "[].name.value" -o tsv 2>/dev/null || true
+}
+
+# fetch_metrics <resource_id> <start_iso> <end_iso> [raw_json_out]
 #
 # Prints "column=value" lines for the metrics defined for that resource type,
 # reduced over the window. Columns whose metric the resource does not publish,
 # or which returned no data points, are printed empty. Never fails the caller:
-# a missing metric must not cost a completed 12-minute measurement.
+# a missing metric must not cost a completed 12-minute measurement. With
+# raw_json_out, the per-minute series behind the reduced values is saved there.
 fetch_metrics() {
-  local resource_id="$1" start_iso="$2" end_iso="$3"
+  local resource_id="$1" start_iso="$2" end_iso="$3" raw_out="${4:-}"
   local spec available names=() seen=()
 
   spec="$(metric_spec_for "$resource_id")" || return 0
 
-  available="$(az monitor metrics list-definitions --resource "$resource_id" \
-    --query "[].name.value" -o tsv 2>/dev/null || true)"
+  available="$(published_metrics "$resource_id")"
   if [ -z "$available" ]; then
     echo "WARNING: no metric definitions readable for $resource_id (deleted resource?)" >&2
-    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    while IFS='|' read -r col _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
     return 0
   fi
 
@@ -200,7 +315,7 @@ fetch_metrics() {
   done <<<"$spec"
 
   if [ ${#names[@]} -eq 0 ]; then
-    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    while IFS='|' read -r col _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
     return 0
   fi
 
@@ -213,14 +328,15 @@ fetch_metrics() {
 
   if [ -z "$json" ]; then
     echo "WARNING: metric query failed for $resource_id" >&2
-    while IFS='|' read -r col _ _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
+    while IFS='|' read -r col _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
     return 0
   fi
+  if [ -n "$raw_out" ]; then printf '%s\n' "$json" >"$raw_out"; fi
 
   SPEC="$spec" python3 -c '
 import json, os, sys
 
-spec = [l.split("|") for l in os.environ["SPEC"].splitlines() if l.strip()]
+spec = [l.split("|")[:3] for l in os.environ["SPEC"].splitlines() if l.strip()]
 data = json.load(sys.stdin)
 
 series = {}
@@ -244,9 +360,4 @@ def reduce(name, how):
 for col, name, how in spec:
     print(f"{col}={reduce(name, how)}")
 ' <<<"$json"
-}
-
-# Column order for the aggregated CSV, per resource type.
-metric_columns_for() {
-  metric_spec_for "$1" | cut -d'|' -f1
 }
