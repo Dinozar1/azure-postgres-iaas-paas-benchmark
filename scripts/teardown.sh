@@ -72,7 +72,7 @@ empty_required_columns() {
     return 0
   fi
   python3 - "$RESULTS_DIR/summary.csv" "$(basename "$run_dir")" \
-    "$(metric_required_columns_for "$rid" | tr '\n' ' ')" <<'PY'
+    "$(metric_required_columns_for "$rid" "$ENV_NAME" | tr '\n' ' ')" <<'PY'
 import csv, sys
 
 path, run_id, required = sys.argv[1], sys.argv[2], sys.argv[3].split()

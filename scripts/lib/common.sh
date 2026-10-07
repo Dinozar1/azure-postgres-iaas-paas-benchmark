@@ -10,13 +10,25 @@ PGBENCH_JOBS=2
 PROGRESS_INTERVAL=60
 DB_PORT=5432
 
-# Length of the --burn-in load, the same on all four configurations. One
-# standard run (~14 min of load) does not drain a data disk's burst-credit
-# pool, and neither did 35 minutes: the pool is sized for 30 min at the full
-# burst rate, but this workload bursts below that rate, so the excess over the
-# baseline is smaller and the pool lasts longer — a Premium P20 ran dry only
-# after ~46 min (sanity check 2026-10-07). 60 minutes leaves a margin.
-BURN_IN_SECONDS=3600
+# Burn-in (CLAUDE.md, "Bursting jako czynnik zakłócający"): the load runs
+# until every credit pool that drains under it has drained, and never less
+# than BURN_IN_SECONDS — what is measured must be a state the configuration
+# can hold indefinitely under this workload. One standard run (~14 min) does
+# not drain a data disk's pool, and neither did 35 min: the pool is sized for
+# 30 min at the full burst rate, but this workload bursts below that rate, so
+# a Premium P20 ran dry only after ~46 min. 60 minutes covers the IaaS disks;
+# the Burstable tier's CPU credits take longer and are drained adaptively
+# (burn_in_drain_rule).
+BURN_IN_SECONDS=3600             # minimum, every configuration
+BURN_IN_MAX_SECONDS=14400        # safety limit for an adaptive burn-in (4 h)
+BURN_IN_CHECK_SECONDS=300        # adaptive burn-in: how often the pool is read
+BURN_IN_DRAIN_MARGIN_SECONDS=600 # adaptive burn-in: load kept on after the
+#                                  pool first reads empty, to cover metric lag
+
+# Phases of the campaign (CLAUDE.md, "Plan statystyczny"). Recorded per run in
+# meta.env and as the phase column of summary.csv, so pilot runs never enter
+# the final dataset. Defaults to pilot: the main phase has to be asked for.
+VALID_PHASES="pilot main"
 
 # How long Azure Monitor takes to make a platform metric queryable. A query
 # over a window that ended more recently than this can come back partially
@@ -192,6 +204,7 @@ IAAS_METRIC_SPEC=(
   "cpu_pct_avg|Percentage CPU|average"
   "cpu_pct_max|Percentage CPU|maximum"
   "cpu_credits_remaining_min|CPU Credits Remaining|minimum"
+  "cpu_credits_remaining_max|CPU Credits Remaining|maximum"
   "mem_available_bytes_min|Available Memory Bytes|minimum"
   "disk_read_iops_avg|Data Disk Read Operations/Sec|average"
   "disk_read_iops_max|Data Disk Read Operations/Sec|maximum"
@@ -217,13 +230,16 @@ IAAS_METRIC_SPEC=(
 # 2026-10-07 (az monitor metrics list-definitions; all support PT1M). Two gaps
 # against the VM set: no disk latency metric — on PaaS, I/O latency comes only
 # from pg_stat_io with track_io_timing — and no storage burst-credit metric.
-# cpu_credits_remaining is published on every tier but only Burstable fills it.
+# cpu_credits_remaining is published on every tier but only Burstable fills it,
+# so it is optional here and required for paas-burstable alone
+# (metric_required_columns_for).
 # fetch_metrics still intersects the list with what the resource reports, so a
 # name Azure ever drops degrades to an empty column instead of failing a run.
 PAAS_METRIC_SPEC=(
   "cpu_pct_avg|cpu_percent|average"
   "cpu_pct_max|cpu_percent|maximum"
   "cpu_credits_remaining_min|cpu_credits_remaining|minimum|optional"
+  "cpu_credits_remaining_max|cpu_credits_remaining|maximum|optional"
   "memory_pct_max|memory_percent|maximum"
   "iops_avg|iops|average"
   "disk_read_iops_avg|read_iops|average"
@@ -270,33 +286,78 @@ PAAS_BURN_IN_METRICS=(
 # steady_state=false; the analysis excludes it and reports it separately. The
 # thresholds may be revised only on the evidence of a burn-in's credit curve,
 # never on TPS results.
-STEADY_DISK_BURST_IO_PCT_MIN=99 # IaaS: disk pool spent, disk_burst_io_pct_min >= this
-STEADY_CPU_CREDITS_MIN=0        # IaaS: CPU not throttled, cpu_credits_remaining_min > this
+STEADY_DISK_BURST_IO_PCT_MIN=99    # IaaS: disk pool spent, disk_burst_io_pct_min >= this
+STEADY_CPU_CREDITS_MIN=0           # IaaS: CPU not throttled, cpu_credits_remaining_min > this
+STEADY_BURSTABLE_CPU_CREDITS_MAX=1 # B1ms: CPU credits spent, cpu_credits_remaining_max <= this
 
 # steady_state <environment> [column=value ...]
 #
 # Prints, from a run's metric columns: true / false for an environment with a
 # criterion; n/a for one that needs none (paas-general-purpose, where the disk
-# is not the bottleneck); pending for one whose criterion is not set yet
-# (paas-burstable, until its sanity check); nothing when the metrics the
-# criterion needs are missing, so it cannot be judged.
+# is not the bottleneck); nothing when the metrics the criterion needs are
+# missing, so it cannot be judged. One principle behind every criterion: the
+# measured state must be one the configuration holds indefinitely under this
+# load. On IaaS the CPU runs below its baseline once the disk pool is spent,
+# so credits > 0 lasts forever there; on B1ms the CPU runs above its baseline,
+# so only spent credits are sustainable.
 steady_state() {
-  local env="$1" burst="" credits="" kv
+  local env="$1" burst="" credits_min="" credits_max="" kv
   shift
   for kv in "$@"; do
     case "$kv" in
     disk_burst_io_pct_min=*) burst="${kv#*=}" ;;
-    cpu_credits_remaining_min=*) credits="${kv#*=}" ;;
+    cpu_credits_remaining_min=*) credits_min="${kv#*=}" ;;
+    cpu_credits_remaining_max=*) credits_max="${kv#*=}" ;;
     esac
   done
   case "$env" in
   iaas-*)
-    [ -n "$burst" ] && [ -n "$credits" ] || return 0
-    awk -v b="$burst" -v c="$credits"       -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_CPU_CREDITS_MIN"       'BEGIN { print (b >= bt && c > ct) ? "true" : "false" }'
+    [ -n "$burst" ] && [ -n "$credits_min" ] || return 0
+    awk -v b="$burst" -v c="$credits_min" \
+      -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_CPU_CREDITS_MIN" \
+      'BEGIN { print (b >= bt && c > ct) ? "true" : "false" }'
+    ;;
+  paas-burstable)
+    [ -n "$credits_max" ] || return 0
+    awk -v c="$credits_max" -v ct="$STEADY_BURSTABLE_CPU_CREDITS_MAX" \
+      'BEGIN { print (c <= ct) ? "true" : "false" }'
     ;;
   paas-general-purpose) echo "n/a" ;;
-  paas-burstable) echo "pending" ;;
   esac
+}
+
+# burn_in_drain_rule <environment>
+#
+# For an environment whose credit pool takes longer than BURN_IN_SECONDS to
+# drain, prints "metric|threshold": the burn-in goes on until the metric reads
+# at or below the threshold, plus BURN_IN_DRAIN_MARGIN_SECONDS. Nothing for the
+# rest, which burn in for exactly BURN_IN_SECONDS — the IaaS disk pools drain
+# within it (P20 after ~46 min), checked per run by the steady-state criterion,
+# and the General Purpose tier has no pool that drains under this load.
+burn_in_drain_rule() {
+  case "$1" in
+  paas-burstable) echo "cpu_credits_remaining|0" ;;
+  esac
+}
+
+# latest_metric_value <resource_id> <metric>
+#
+# Prints "value timestamp" for the newest per-minute average of a metric in
+# the last 20 minutes, or nothing if there is none yet.
+latest_metric_value() {
+  az monitor metrics list --resource "$1" --metric "$2" \
+    --start-time "$(date -u -d '-20 min' +%Y-%m-%dT%H:%M:%SZ)" \
+    --interval PT1M --aggregation Average -o json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+pts = [p for m in data.get("value", []) for ts in m.get("timeseries", [])
+       for p in ts.get("data", []) if p.get("average") is not None]
+if pts:
+    print(pts[-1]["average"], pts[-1]["timeStamp"])
+' || true
 }
 
 # Prints "iaas" or "paas" for a metrics resource id.
@@ -333,9 +394,16 @@ metric_columns_for() {
   metric_spec_for "$1" | cut -d'|' -f1
 }
 
+# metric_required_columns_for <resource_id> [environment]
+#
 # Columns that must be filled before teardown.sh may destroy the environment.
+# The Burstable tier's criterion rests on its CPU credits, so there they are
+# required although optional for the resource type as a whole.
 metric_required_columns_for() {
   metric_spec_for "$1" | awk -F'|' '$4 != "optional" { print $1 }'
+  if [ "${2:-}" = paas-burstable ]; then
+    printf '%s\n' cpu_credits_remaining_min cpu_credits_remaining_max
+  fi
 }
 
 # Names of the metrics a resource publishes, one per line; empty if none are

@@ -42,11 +42,25 @@ key `~/.ssh/id_rsa_pgbench`. `bootstrap/` must have been applied once. Copy
 `terraform.tfvars.example` to `terraform.tfvars` in the environment and set
 `admin_source_ip` to your current public IP (`curl ifconfig.me`).
 
+A whole measurement session is one command (run it inside tmux or screen):
+
+```sh
+scripts/run-session.sh <env> <repetitions> [--phase pilot|main]
+```
+
+It sets `admin_source_ip`, applies the environment, waits for cloud-init,
+loads the data, burns in, runs the repetitions back to back and tears the
+environment down. On any error, Ctrl+C, SIGTERM or SIGHUP a trap runs
+`teardown.sh --force`, so nothing is left running. Runs are marked `pilot`
+unless `--phase main` is given; only `main` runs make the final dataset.
+
+The same steps by hand:
+
 ```sh
 terraform -chdir=environments/<env> init
 terraform -chdir=environments/<env> apply
 scripts/init-db.sh <env>                 # pgbench -i -s 1000, once per environment
-scripts/run-benchmark.sh <env> --burn-in # 60-min burn-in, then the first measured run
+scripts/run-benchmark.sh <env> --burn-in # burn-in (>= 60 min), then the first measured run
 scripts/run-benchmark.sh <env>           # each further repetition
 scripts/teardown.sh <env>                # collect metrics, archive results, terraform destroy
 ```

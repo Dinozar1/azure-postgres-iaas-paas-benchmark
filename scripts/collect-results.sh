@@ -2,6 +2,8 @@
 # Aggregates the per-run output pulled locally by run-benchmark.sh
 # (results/<environment>/<run-id>/) into results/<environment>/summary.csv,
 # one row per measured run:
+#   - phase: pilot or main (run-benchmark.sh --phase); only main runs make the
+#     final dataset
 #   - steady_state: whether the run meets the environment's steady-state
 #     criterion (lib/common.sh, steady_state); failing runs are kept, flagged
 #   - pgbench throughput and latency (summary.txt)
@@ -100,7 +102,7 @@ load_metrics() {
   while read -r col; do
     [ -n "$col" ] || continue
     [ -n "${metric_values[$col]-}" ] || complete=false
-  done < <(metric_required_columns_for "$rid")
+  done < <(metric_required_columns_for "$rid" "$ENV_NAME")
 
   local settled=$(($(date +%s) - $(iso_to_epoch "$end") >= METRIC_INGESTION_LAG_SECONDS))
   if $complete && [ "$settled" -eq 1 ]; then
@@ -113,7 +115,7 @@ load_metrics() {
 
 CSV="$RESULTS_DIR/summary.csv"
 {
-  printf 'run_id,measure_start,steady_state,idle_gap_s,tps,latency_avg_ms'
+  printf 'run_id,phase,measure_start,steady_state,idle_gap_s,tps,latency_avg_ms'
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$STATS_COLUMNS"
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$METRIC_COLUMNS"
   printf '\n'
@@ -150,6 +152,7 @@ for run_dir in "$RESULTS_DIR"/*/; do
   measure_start="$(env_get "${run_dir}window.env" MEASURE_START)"
   measure_end="$(env_get "${run_dir}window.env" MEASURE_END)"
   idle_gap="$(env_get "$meta" IDLE_GAP_S)"
+  phase="$(env_get "$meta" PHASE)"
   metrics_resource_id="$(env_get "$meta" METRICS_RESOURCE_ID)"
 
   declare -A stat_values=()
@@ -172,10 +175,11 @@ for run_dir in "$RESULTS_DIR"/*/; do
 
   steady="$(steady_state "$ENV_NAME" \
     "disk_burst_io_pct_min=${metric_values[disk_burst_io_pct_min]-}" \
-    "cpu_credits_remaining_min=${metric_values[cpu_credits_remaining_min]-}")"
+    "cpu_credits_remaining_min=${metric_values[cpu_credits_remaining_min]-}" \
+    "cpu_credits_remaining_max=${metric_values[cpu_credits_remaining_max]-}")"
 
   {
-    printf '%s,%s,%s,%s,%s,%s' "$run_id" "$measure_start" "$steady" "$idle_gap" "$tps" "$latency"
+    printf '%s,%s,%s,%s,%s,%s,%s' "$run_id" "$phase" "$measure_start" "$steady" "$idle_gap" "$tps" "$latency"
     while read -r col; do
       [ -n "$col" ] && printf ',%s' "$(csv_field "${stat_values[$col]-}")"
     done <<<"$STATS_COLUMNS"
