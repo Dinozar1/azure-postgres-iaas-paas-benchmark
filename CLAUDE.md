@@ -121,6 +121,22 @@ Przebiegi `true` (n = 3): **TPS średnia 957,8; SD 9,1; 95% CI ±22,7 (t, df = 2
 
 Wszystkie 5 (n = 5): **TPS średnia 1383,7; SD 7,0; 95% CI ±8,7 (t, df = 4)**; latencja średnia 18,06 ms, SD 0,09, 95% CI ±0,12; p99 średnia 47,8 ms, SD 0,5, 95% CI ±0,6. Wąskie gardło jak w sanity checku: CPU (~83%), dysk na ~70% limitu. Obserwacja do analizy: w każdym przebiegu TPS z pierwszych 3 min jest o ~1,5% wyższy niż z ostatnich 3 min (np. 1404,6 → 1381,1) — mały, powtarzalny dryf wewnątrz przebiegu.
 
+## Pilotaż — sesja 3: `iaas-standard-ssd` (2026-10-08)
+
+`run-session.sh iaas-standard-ssd 5` (17:08–21:56): init-db 10 min 19 s; burn-in 60 min (pula E20 wyczerpana po ~35 min); **reset po burn-inie 40 min** — VACUUM ograniczony przez IOPS dysku (zapisy ~500–520 IOPS, równo na poziomie bazowym E20, więc pula się nie odnowiła); warm-upy adaptacyjne 246–555 s; wszystkie 5 przebiegów spełnia kryterium. Dane: `results/iaas-standard-ssd/summary.csv`.
+
+| przebieg | warm-up [s] | TPS | latencja śr. [ms] | p99 [ms] | checkpointy w oknie | TPS pierwsze / ostatnie 3 min |
+|---|---|---|---|---|---|---|
+| 1 | 247 | 176,2 | 141,8 | 409,9 | 1 | 269 / 171 |
+| 2 | 246 | 184,6 | 135,4 | 397,8 | 1 | 274 / 184 |
+| 3 | 493 | 155,1 | 161,1 | 409,7 | 2 | 142 / 140 |
+| 4 | 246 | 168,2 | 148,6 | 444,1 | 1 | 272 / 144 |
+| 5 | 555 | 158,4 | 157,8 | 401,2 | 2 | 143 / 150 |
+
+n = 5: **TPS średnia 168,5; SD 12,3; 95% CI ±15,2 (t, df = 4)**; latencja średnia 149,0 ms, SD 10,8, 95% CI ±13,3; p99 średnia 412,6 ms, SD 18,4, 95% CI ±22,9. CPU ~9% — czysto dyskowe ograniczenie.
+
+- **[DECYZJA] Checkpoint dominuje rozrzut na E20.** Checkpoint czasowy (co 10 min, ~900 MB zapisu) zabiera ~360 z ~500 IOPS dysku: odczyty spadają z ~460 do ~195 IOPS, TPS z ~330 do ~130 na ~9 min. Faza cyklu względem startu pomiaru zależy od długości warm-upu: przebiegi z długim warm-upem (493 i 555 s) zaczęły się w trakcie checkpointu i miały w oknie 2 checkpointy (155 i 158 TPS), pozostałe 1 (168–185 TPS). Rozrzut wynika więc w dużej mierze z fazy checkpointu, nie z platformy. Na P20 i GP tego efektu nie widać (checkpoint nie wyczerpuje tam budżetu I/O). Propozycja: `CHECKPOINT` tuż przed każdym pomiarem (na PaaS do sprawdzenia uprawnienia — w PG16 rola `pg_checkpoint`).
+
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
 **Uzasadnienie — zestawienie z sanity checków (pojedyncze przebiegi, nie wnioski):**
