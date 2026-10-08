@@ -557,15 +557,64 @@ if not rows:
 ' <<<"$json"
 }
 
-# fetch_metrics <resource_id> <start_iso> <end_iso> [raw_json_out]
+# reduce_metrics <resource_id> <metrics_json_file>
 #
-# Prints "column=value" lines for the metrics defined for that resource type,
-# reduced over the window. Columns whose metric the resource does not publish,
-# or which returned no data points, are printed empty. Never fails the caller:
-# a missing metric must not cost a completed 12-minute measurement. With
-# raw_json_out, the per-minute series behind the reduced values is saved there.
+# Prints "column=value" lines for the resource type's metric spec, reduced
+# from a saved `az monitor metrics list` response. Only minutes that carry
+# data count: for a minute without data Azure returns no average but a
+# minimum of 0.0, which would otherwise pass for a real reading (a run's
+# CPU-credit minimum once came out as 0.00 that way). Collection works from
+# the saved file, so a fix here applies to past runs too — offline, after the
+# resource is gone.
+reduce_metrics() {
+  local spec
+  spec="$(metric_spec_for "$1")" || return 0
+  SPEC="$spec" python3 -c '
+import json, os, sys
+
+spec = [l.split("|")[:3] for l in os.environ["SPEC"].splitlines() if l.strip()]
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    data = {}
+
+series = {}
+for m in data.get("value", []):
+    pts = [p for ts in m.get("timeseries", []) for p in ts.get("data", [])
+           if p.get("average") is not None]
+    series[m["name"]["value"]] = sorted(pts, key=lambda p: p["timeStamp"])
+
+def reduce(name, how):
+    pts = series.get(name, [])
+    if how in ("first", "last"):
+        if not pts:
+            return ""
+        value = pts[0 if how == "first" else -1]["average"]
+        return f"{value:.2f}"
+    vals = [p[how] for p in pts if p.get(how) is not None]
+    if not vals:
+        return ""
+    if how == "maximum":
+        return f"{max(vals):.2f}"
+    if how == "minimum":
+        return f"{min(vals):.2f}"
+    return f"{sum(vals)/len(vals):.2f}"
+
+for col, name, how in spec:
+    print(f"{col}={reduce(name, how)}")
+' "$2"
+}
+
+# fetch_metrics <resource_id> <start_iso> <end_iso> <raw_json_out>
+#
+# Queries the metrics defined for the resource type over the window, saves the
+# per-minute series to raw_json_out and prints them reduced (reduce_metrics).
+# Columns whose metric the resource does not publish, or which returned no
+# data points, are printed empty. Never fails the caller: a missing metric
+# must not cost a completed 12-minute measurement. raw_json_out is written
+# only from a successful query, so a failed one never overwrites saved data.
 fetch_metrics() {
-  local resource_id="$1" start_iso="$2" end_iso="$3" raw_out="${4:-}"
+  local resource_id="$1" start_iso="$2" end_iso="$3" raw_out="$4"
   local spec available names=() seen=()
 
   spec="$(metric_spec_for "$resource_id")" || return 0
@@ -607,40 +656,6 @@ fetch_metrics() {
     while IFS='|' read -r col _; do [ -n "$col" ] && echo "${col}="; done <<<"$spec"
     return 0
   fi
-  if [ -n "$raw_out" ]; then printf '%s\n' "$json" >"$raw_out"; fi
-
-  SPEC="$spec" python3 -c '
-import json, os, sys
-
-spec = [l.split("|")[:3] for l in os.environ["SPEC"].splitlines() if l.strip()]
-data = json.load(sys.stdin)
-
-series = {}
-for m in data.get("value", []):
-    name = m["name"]["value"]
-    pts = []
-    for ts in m.get("timeseries", []):
-        pts.extend(ts.get("data", []))
-    series[name] = pts
-
-def reduce(name, how):
-    if how in ("first", "last"):
-        pts = sorted((p["timeStamp"], p["average"]) for p in series.get(name, [])
-                     if p.get("average") is not None)
-        if not pts:
-            return ""
-        idx = 0 if how == "first" else -1
-        return f"{pts[idx][1]:.2f}"
-    vals = [p[how] for p in series.get(name, []) if p.get(how) is not None]
-    if not vals:
-        return ""
-    if how == "maximum":
-        return f"{max(vals):.2f}"
-    if how == "minimum":
-        return f"{min(vals):.2f}"
-    return f"{sum(vals)/len(vals):.2f}"
-
-for col, name, how in spec:
-    print(f"{col}={reduce(name, how)}")
-' <<<"$json"
+  printf '%s\n' "$json" >"$raw_out"
+  reduce_metrics "$resource_id" "$raw_out"
 }

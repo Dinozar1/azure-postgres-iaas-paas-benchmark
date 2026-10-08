@@ -21,9 +21,10 @@
 # for a deleted resource, so once the environment is gone the metric columns
 # can never be filled in for runs not yet collected — the pgbench numbers
 # survive, the context does not. Once a run's metrics are complete and older
-# than the ingestion lag, they are cached in its metrics.env (with the raw
-# per-minute series in azure-metrics.json) and never re-fetched, so collecting
-# again after a later session's environment is gone loses nothing.
+# than the ingestion lag, its raw per-minute series (azure-metrics.json) is
+# kept and never re-fetched; the columns are reduced from it offline (see
+# load_metrics), so collecting again after the environment is gone loses
+# nothing.
 #
 # Runs recorded with --burn-in are skipped: they exist to drain disk burst
 # credits, not to be measured.
@@ -71,33 +72,40 @@ csv_field() {
   fi
 }
 
-# Loads a run's metric columns into the metric_values array: from the cache
-# when it covers every current column, otherwise from Azure Monitor (cached
-# only when complete and past the ingestion lag, so a partial or premature
-# read is retried next time instead of frozen).
+# Loads a run's metric columns into the metric_values array. A run whose
+# metrics were once fetched complete and past the ingestion lag has a
+# metrics.env marker and its raw per-minute series in azure-metrics.json; its
+# values are then reduced from that file, offline, so collection keeps working
+# after the environment is gone and any fix to the reduction reaches past runs
+# (metrics.env is rewritten to match). Otherwise the metrics are fetched from
+# Azure Monitor and marked complete only when every required column is filled
+# and the window has settled, so a partial or premature read is retried next
+# time instead of frozen.
 load_metrics() {
   local run_dir="$1" rid="$2" start="$3" end="$4"
-  local cache="${run_dir}metrics.env" col val complete=true
+  local marker="${run_dir}metrics.env" raw="${run_dir}azure-metrics.json" col val complete=true
+  local values
 
-  if [ -f "$cache" ]; then
-    local cached_all=true
-    while read -r col; do
-      [ -n "$col" ] || continue
-      grep -qE "^${col}=" "$cache" || cached_all=false
-    done <<<"$METRIC_COLUMNS"
-    if $cached_all; then
-      while IFS='=' read -r col val; do
-        [ -n "$col" ] && metric_values["$col"]="$val"
-      done <"$cache"
-      return 0
-    fi
+  if [ -f "$marker" ] && [ -f "$raw" ]; then
+    values="$(reduce_metrics "$rid" "$raw")"
+    printf '%s\n' "$values" >"$marker"
+    while IFS='=' read -r col val; do
+      [ -n "$col" ] && metric_values["$col"]="$val"
+    done <<<"$values"
+    return 0
+  fi
+  if [ -f "$marker" ]; then
+    # Collected before the raw series was kept: the reduced values are all there is.
+    while IFS='=' read -r col val; do
+      [ -n "$col" ] && metric_values["$col"]="$val"
+    done <"$marker"
+    return 0
   fi
 
-  local fetched
-  fetched="$(fetch_metrics "$rid" "$start" "$end" "${run_dir}azure-metrics.json")"
+  values="$(fetch_metrics "$rid" "$start" "$end" "$raw")"
   while IFS='=' read -r col val; do
     [ -n "$col" ] && metric_values["$col"]="$val"
-  done <<<"$fetched"
+  done <<<"$values"
 
   while read -r col; do
     [ -n "$col" ] || continue
@@ -106,7 +114,7 @@ load_metrics() {
 
   local settled=$(($(date +%s) - $(iso_to_epoch "$end") >= METRIC_INGESTION_LAG_SECONDS))
   if $complete && [ "$settled" -eq 1 ]; then
-    printf '%s\n' "$fetched" >"$cache"
+    printf '%s\n' "$values" >"$marker"
   elif [ "$settled" -eq 0 ]; then
     echo "WARNING: $(basename "$run_dir") ended less than ${METRIC_INGESTION_LAG_SECONDS}s ago;" \
       "its metrics may be partially ingested and will be re-fetched next time" >&2

@@ -85,6 +85,24 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
 **Ważne:** dokładne nazwy SKU dla Flexible Server bywają zależne od regionu — zawsze zweryfikuj przed `apply`:
 `az postgres flexible-server list-skus --location belgiumcentral`
 
+## Pilotaż — sesja 1: `iaas-premium-ssd` (2026-10-08)
+
+`run-session.sh iaas-premium-ssd 5` (10:04–13:34): init-db 7 min 17 s; **burn-in adaptacyjny 100 min** — pula dysku drenowała się wolniej niż w sanity checku (~1,3 p.p./min wobec ~2), wyczerpana ok. 90. minuty, kredyty CPU spadały w czasie burstu i ustabilizowały się po nim (`BURN_IN_POOLS`: dysk 100% spent, CPU 57,2 level). Dane: `results/iaas-premium-ssd/summary.csv` (faza `pilot`).
+
+| przebieg | TPS | latencja śr. [ms] | p99 [ms] | `disk_burst_io_pct_min` | reset przed przebiegiem | `steady_state` |
+|---|---|---|---|---|---|---|
+| 1 | 951,4 | 26,27 | 66,6 | 100 | — (burn-in) | true |
+| 2 | 1095,2 | 22,82 | 65,2 | **86** | **397 s** | **false** |
+| 3 | 953,8 | 26,20 | 66,4 | 99 | 213 s | true |
+| 4 | 968,2 | 25,81 | 65,6 | 100 | 210 s | true |
+| 5 | 955,5 | 26,16 | 65,2 | **97** | 272 s | **false** |
+
+Przebiegi `true` (n = 3): **TPS 957,8 ± 9,1 (CV 0,95%)**, latencja 26,09 ± 0,25 ms, CPU ~38–39%, IOPS ~2350 (poziom bazowy P20), latencja dysku z Azure ~8–9 ms. Liczby pilotażu służą wyłącznie do wyliczenia N.
+
+- **Reset między przebiegami odnawia pulę dysku.** W czasie `TRUNCATE` + `VACUUM ANALYZE` dysk robi mniej IOPS niż bazowe 2300, więc pula się odbudowuje. Pierwszy reset po burn-inie jest długi (397 s — VACUUM sprząta martwe krotki ze 100 min burn-inu, który VACUUM nie robi) i odbudował ~14% puli: przebieg 2 mierzył dysk burstujący (IOPS 2500–3450, +15% TPS). Kolejne resety (~210–270 s) odbudowują ~1–3%; 2-minutowy warm-up nie zawsze to zjada przed pierwszym punktem metryki (przebieg 5: 97%, choć TPS bez śladu burstu). Kryterium zadziałało zgodnie z projektem — oba przebiegi oznaczone `false`.
+- **Błąd w redukcji metryk (naprawiony):** dla minuty bez danych Azure zwraca brak `average`, ale `minimum` = 0,0 — przebieg 4 dostał przez to `cpu_credits_remaining_min` = 0,00 i fałszywe `false`. Redukcja liczy teraz tylko minuty z danymi i działa na zapisanej surowej serii (`azure-metrics.json`), więc poprawka objęła już zebrane przebiegi (offline, po destroy).
+- **[DECYZJA] przed kolejnymi sesjami:** (a) VACUUM na końcu burn-inu + ponowny drenaż pul przed przebiegiem 1, żeby duży VACUUM nie lądował przed przebiegiem 2; (b) dla B1ms adaptacyjny warm-up przed każdym przebiegiem (w czasie resetu CPU spada poniżej poziomu bazowego, kredyty wracają, a kryterium wymaga ≤ 1); (c) przebieg 5 (97% wobec progu 99%) — próg wolno zmienić tylko na podstawie krzywej kredytów.
+
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
 **Uzasadnienie — zestawienie z sanity checków (pojedyncze przebiegi, nie wnioski):**
