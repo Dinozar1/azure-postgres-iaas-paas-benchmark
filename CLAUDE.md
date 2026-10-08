@@ -107,6 +107,20 @@ Przebiegi `true` (n = 3): **TPS średnia 957,8; SD 9,1; 95% CI ±22,7 (t, df = 2
 - **Błąd w redukcji metryk (naprawiony):** dla minuty bez danych Azure zwraca brak `average`, ale `minimum` = 0,0 — przebieg 4 dostał przez to `cpu_credits_remaining_min` = 0,00 i fałszywe `false`. Redukcja liczy teraz tylko minuty z danymi i działa na zapisanej surowej serii (`azure-metrics.json`), więc poprawka objęła już zebrane przebiegi (offline, po destroy).
 - **Rozstrzygnięte 2026-10-08:** (a) reset na końcu burn-inu + ponowny drenaż pul przed przebiegiem 1 — wszystkie konfiguracje; (b) adaptacyjny warm-up przed każdym przebiegiem, jednolicie (pule wyczerpane w burn-inie) — sekcja "Bursting"; (c) przebieg 5 zostaje `false`, próg bez zmian, analiza wrażliwości; (d) format statystyk: średnia, SD, 95% CI z t, podpisane.
 
+## Pilotaż — sesja 2: `paas-general-purpose` (2026-10-08)
+
+`run-session.sh paas-general-purpose 5` (14:03–17:08), **pierwsza sesja według protokołu z 2026-10-08**: init-db 6 min 44 s; burn-in stały 60 min (GP nie ma pul) zakończony resetem (~8 min); warm-up przed każdym przebiegiem stały 120 s. Dane: `results/paas-general-purpose/summary.csv` (faza `pilot`, `steady_state` = `n/a` — brak kryterium dla GP).
+
+| przebieg | TPS | latencja śr. [ms] | p99 [ms] | CPU śr. | `iops` śr. | dysk % limitu |
+|---|---|---|---|---|---|---|
+| 1 | 1395,7 | 17,90 | 47,6 | 81% | 3718 | 76% |
+| 2 | 1382,0 | 18,08 | 48,1 | 83% | 3680 | 68% |
+| 3 | 1381,9 | 18,08 | 47,0 | 84% | 3705 | 68% |
+| 4 | 1377,2 | 18,15 | 47,8 | 84% | 3694 | 68% |
+| 5 | 1381,6 | 18,09 | 48,2 | 83% | 3697 | 70% |
+
+Wszystkie 5 (n = 5): **TPS średnia 1383,7; SD 7,0; 95% CI ±8,7 (t, df = 4)**; latencja średnia 18,06 ms, SD 0,09, 95% CI ±0,12; p99 średnia 47,8 ms, SD 0,5, 95% CI ±0,6. Wąskie gardło jak w sanity checku: CPU (~83%), dysk na ~70% limitu. Obserwacja do analizy: w każdym przebiegu TPS z pierwszych 3 min jest o ~1,5% wyższy niż z ostatnich 3 min (np. 1404,6 → 1381,1) — mały, powtarzalny dryf wewnątrz przebiegu.
+
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
 **Uzasadnienie — zestawienie z sanity checków (pojedyncze przebiegi, nie wnioski):**
