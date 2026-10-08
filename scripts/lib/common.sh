@@ -3,7 +3,14 @@ set -euo pipefail
 
 # --- pgbench parameters (fixed by thesis methodology — see CLAUDE.md) ---
 PGBENCH_SCALE=1000
-WARMUP_SECONDS=120
+# Warm-up before each measured run (CLAUDE.md, "Bursting"): at least
+# WARMUP_SECONDS, then on while any pool that drained in the burn-in has not
+# read spent again since the warm-up began — the reset between runs runs
+# below the disk's baseline and the CPU's, and refills both a little. Where
+# nothing drains (General Purpose), the warm-up is exactly WARMUP_SECONDS.
+WARMUP_SECONDS=120          # minimum
+WARMUP_MAX_SECONDS=2400     # safety limit for an adaptive warm-up (40 min)
+WARMUP_CHECK_SECONDS=60     # adaptive warm-up: how often the pools are read
 MEASURE_SECONDS=720
 PGBENCH_CLIENTS=25
 PGBENCH_JOBS=2
@@ -415,6 +422,36 @@ BURN_IN_TREND_SECONDS=900      # look-back for "still draining"
 BURN_IN_TREND_MIN_SPAN=600     # shortest series span a trend is judged on
 BURN_IN_TREND_USED_PCT_TOL=1   # "used" pool still draining if it rose by more than this
 BURN_IN_TREND_CREDITS_TOL=0.5  # "balance" pool still draining if it fell by more than this
+
+# pool_spec <environment> <metric> — the burn_in_pools line for one metric.
+pool_spec() {
+  burn_in_pools "$1" | awk -F'|' -v m="$2" '$1 == m'
+}
+
+# pool_reads_spent <kind> <value> <spent_at> — exit status 0 if spent.
+pool_reads_spent() {
+  awk -v v="$2" -v t="$3" -v k="$1" 'BEGIN { exit !(k == "used" ? v >= t : v <= t) }'
+}
+
+# burn_in_spent_pools <results_env_dir>
+#
+# The pools the current incarnation's burn-in ran down to spent, one metric
+# name per line — the pools each warm-up has to bring back to spent. Taken
+# from the newest burn-in that started after the newest init-db.sh, so a
+# destroyed incarnation's burn-in never counts. Empty if there is none.
+burn_in_spent_pools() {
+  local dir="$1" init_end="" b meta load_start latest=""
+  init_end="$( (grep -hE '^INIT_END=' "$dir"/init-*.env 2>/dev/null || true) | cut -d= -f2- | sort | tail -n1)"
+  for b in "$dir"/burnin-*/; do
+    [ -f "${b}meta.env" ] || continue
+    load_start="$(env_get "${b}window.env" LOAD_START)"
+    [ -n "$load_start" ] || continue
+    [[ -z "$init_end" || ! "$load_start" < "$init_end" ]] || continue
+    [[ -z "$latest" || "$b" > "$latest" ]] && latest="$b"
+  done
+  [ -n "$latest" ] || return 0
+  env_get "${latest}meta.env" BURN_IN_SPENT_POOLS | tr ';' '\n' | sed '/^$/d'
+}
 
 # metric_trend <resource_id> <metric> <lookback_seconds>
 #

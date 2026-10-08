@@ -51,4 +51,4 @@ jobs:
           done
 
       - name: python syntax
-        run: python3 -m py_compile scripts/lib/*.py
+        run: python3 -m py_compile scripts/*.py scripts/lib/*.py

@@ -123,7 +123,7 @@ load_metrics() {
 
 CSV="$RESULTS_DIR/summary.csv"
 {
-  printf 'run_id,phase,measure_start,steady_state,idle_gap_s,tps,latency_avg_ms'
+  printf 'run_id,phase,measure_start,steady_state,idle_gap_s,warmup_s,tps,latency_avg_ms'
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$STATS_COLUMNS"
   while read -r col; do [ -n "$col" ] && printf ',%s' "$col"; done <<<"$METRIC_COLUMNS"
   printf '\n'
@@ -161,6 +161,7 @@ for run_dir in "$RESULTS_DIR"/*/; do
   measure_end="$(env_get "${run_dir}window.env" MEASURE_END)"
   idle_gap="$(env_get "$meta" IDLE_GAP_S)"
   phase="$(env_get "$meta" PHASE)"
+  warmup_s="$(env_get "$meta" WARMUP_S)"
   metrics_resource_id="$(env_get "$meta" METRICS_RESOURCE_ID)"
 
   declare -A stat_values=()
@@ -191,7 +192,7 @@ for run_dir in "$RESULTS_DIR"/*/; do
     "cpu_credits_remaining_last=${metric_values[cpu_credits_remaining_last]-}")"
 
   {
-    printf '%s,%s,%s,%s,%s,%s,%s' "$run_id" "$phase" "$measure_start" "$steady" "$idle_gap" "$tps" "$latency"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s' "$run_id" "$phase" "$measure_start" "$steady" "$idle_gap" "$warmup_s" "$tps" "$latency"
     while read -r col; do
       [ -n "$col" ] && printf ',%s' "$(csv_field "${stat_values[$col]-}")"
     done <<<"$STATS_COLUMNS"
