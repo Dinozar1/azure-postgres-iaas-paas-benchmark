@@ -10,14 +10,14 @@
 # run two dry runs at the same time.
 #
 # Usage: tests/dry-run/run.sh [scenario ...]    (default: all)
-# Scenarios: iaas gp burstable readcache error checkpoint
+# Scenarios: iaas gp burstable readcache error checkpoint campaign
 # The work directory is removed after a clean pass (unless DRYRUN_KEEP=1) and
 # kept after a failure.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-ALL_SCENARIOS="iaas gp burstable readcache error checkpoint"
+ALL_SCENARIOS="iaas gp burstable readcache error checkpoint campaign"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pgbench-dryrun.XXXXXX")"
 FAILURES=0
 
@@ -96,6 +96,11 @@ in_sandbox() {
 # session <env> <N> [options]: run-session.sh in the sandbox; output to session.out.
 session() {
   (cd "$SB/repo" && in_sandbox scripts/run-session.sh "$@") >>"$SB/session.out" 2>&1
+}
+
+# campaign [options]: run-campaign.sh in the sandbox; output to session.out.
+campaign() {
+  (cd "$SB/repo" && in_sandbox scripts/run-campaign.sh "$@") >>"$SB/session.out" 2>&1
 }
 
 scenario_iaas() {
@@ -185,6 +190,47 @@ scenario_checkpoint() {
   check "init-db names the mismatch" grep -q 'checkpoint_timeout is 300s, the measured window assumes 600s' "$SB/session.out"
   check "no data loaded (no pgbench -i)" test "$(grep -c '^\[pgbench\] -i' "$SB/calls.log")" -eq 0
   check "environment destroyed" grep -q '^\[terraform\] destroy' "$SB/calls.log"
+}
+
+scenario_campaign() {
+  echo "== campaign: run-campaign.sh over a three-round order"
+  sandbox campaign paas-general-purpose iaas-premium-ssd paas-burstable
+  mkdir -p "$SB/repo/campaign"
+  printf '%s\n' "# test order" "round,position,environment,seed" \
+    "1,1,paas-general-purpose,1" "1,2,iaas-premium-ssd,1" "2,1,paas-burstable,1" "3,1,paas-general-purpose,1" \
+    >"$SB/repo/campaign/round-order.csv"
+  local ledger="$SB/repo/campaign/sessions.csv" stop="$SB/repo/results/.campaign-stop"
+  export FAKE_LINEAR='{"Data Disk Used Burst IO Credits Percentage": [100, 100], "CPU Credits Remaining": [50, 50]}' FAKE_CREDITS=1
+  check "round 1 exits 0" campaign --last-round 1
+  check "ledger: two sessions, both exit 0" test "$(col "$ledger" exit_status | tr '\n' ' ')" = "0 0 "
+  check "ledger: session_id recorded" none_empty "$ledger" session_id
+  check "ledger: campaign order kept" test "$(col "$ledger" environment | tr '\n' ' ')" = "paas-general-purpose iaas-premium-ssd "
+  check "5 runs per session, phase main" all_equal "$SB/repo/results/iaas-premium-ssd/summary.csv" phase main
+  check "5 runs per session (count)" rows "$SB/repo/results/iaas-premium-ssd/summary.csv" 5
+  check "--last-round 1 left round 2 alone" test ! -e "$SB/repo/results/paas-burstable"
+  local applies
+  applies="$(grep -c '^\[terraform\] apply' "$SB/calls.log")"
+  check "relaunch: nothing left in round 1" campaign --last-round 1
+  check "relaunch applied nothing" test "$(grep -c '^\[terraform\] apply' "$SB/calls.log")" -eq "$applies"
+  touch "$stop"
+  if campaign; then fail "stop file present: refuses to start"; else pass "stop file present: refuses to start"; fi
+  rm -f "$stop"
+  export FAKE_PGBENCH_FAIL_T=600
+  if campaign; then fail "failed session stops the campaign"; else pass "failed session stops the campaign"; fi
+  unset FAKE_PGBENCH_FAIL_T
+  check "ledger: failure recorded" test "$(col "$ledger" exit_status | tail -1)" != 0
+  check "relaunch retries the failed session" campaign --last-round 2
+  check "ledger: failure, then the retry succeeded" grep -Eq '^0 0 [1-9][0-9]* 0 $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
+  export FAKE_CHECKPOINTS_REQ=1
+  if campaign; then fail "over 20% checkpoint_aligned=false stops the campaign"; else pass "over 20% checkpoint_aligned=false stops the campaign"; fi
+  unset FAKE_CHECKPOINTS_REQ
+  check "the session itself is recorded as done" test "$(col "$ledger" exit_status | tail -1)" = 0
+  check "the stop names the checkpoint check" grep -q 'checkpoint_aligned check for paas-general-purpose failed' "$SB/session.out"
+  in_sandbox python3 "$SB/repo/scripts/summarize.py" paas-general-purpose >"$SB/summarize.out" 2>&1 || true
+  check "summarize: share and warning printed" grep -q 'phase=main  checkpoint_aligned=false: 5 of 10 runs (50%)  WARNING' "$SB/summarize.out"
+  check "summarize: sensitivity without misaligned runs" grep -q 'without checkpoint_aligned=false (sensitivity)' "$SB/summarize.out"
+  unset FAKE_LINEAR FAKE_CREDITS
+  check "no fake pgbench left running" no_fake_pgbench_left
 }
 
 for tool in ssh scp terraform az psql pgbench cloud-init curl sleep; do

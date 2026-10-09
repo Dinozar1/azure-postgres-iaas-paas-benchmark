@@ -2,6 +2,7 @@
 """Summary statistics for results/<environment>/summary.csv.
 
 Usage: summarize.py <environment-or-summary.csv> [...]
+       summarize.py --alignment-check <phase> <environment-or-summary.csv> [...]
 
 The statistical unit is the SESSION (one deployment of the environment), not
 the run: runs of one session share a host and its neighbours, so they are not
@@ -16,10 +17,19 @@ the sanity check ran a shorter burn-in). So, per phase:
      (df = k - 1), also as a percentage of the mean against the campaign's
      +-5% target (CLAUDE.md, "Plan kampanii").
 
-Done twice: over steady-state runs only (steady_state = true, or n/a where a
-configuration has no criterion) and over every run, the sensitivity check
-reported alongside. Within-session spread is printed as description only.
-Every number is labelled, so a spread is never mistaken for an interval.
+The main analysis takes the steady-state runs (steady_state = true, or n/a
+where a configuration has no criterion), checkpoint_aligned = false included.
+Two sensitivity checks are reported alongside: every run, and the steady-state
+runs without checkpoint_aligned = false. Within-session spread is printed as
+description only. Every number is labelled, so a spread is never mistaken for
+an interval.
+
+Per phase it also prints the share of runs with checkpoint_aligned = false.
+Over 20% in a phase measured with the 600 s window (main, explanatory) is the
+agreed warning sign that the real checkpoint cycle is not 600 s: the campaign
+stops and the finding is reported. --alignment-check prints only that share
+for the given phase and exits 3 when it is over the limit (run-campaign.sh
+calls it after every session).
 """
 import csv
 import math
@@ -29,6 +39,11 @@ import sys
 
 METRICS = [("tps", "TPS"), ("latency_avg_ms", "latency [ms]"), ("lat_p99_ms", "p99 [ms]")]
 TARGET_PCT = 5.0
+ALIGNMENT_WARN_PCT = 20.0
+# Phases measured with the 600 s window (one checkpoint cycle). The pilot's
+# 720 s window held one or two checkpoints by design, so there the share of
+# checkpoint_aligned = false checks nothing.
+CYCLE_WINDOW_PHASES = {"main", "explanatory"}
 
 
 def _betacf(a, b, x):
@@ -140,7 +155,36 @@ def load(arg):
         return os.path.normpath(path), list(csv.DictReader(f))
 
 
+def alignment(phase, rows):
+    """A line on the share of checkpoint_aligned = false, and whether it is over the limit."""
+    values = [r.get("checkpoint_aligned") for r in rows if r.get("checkpoint_aligned") in ("true", "false")]
+    if not values:
+        return "checkpoint_aligned: no values", False
+    false = values.count("false")
+    pct = 100 * false / len(values)
+    line = f"checkpoint_aligned=false: {false} of {len(values)} runs ({pct:.0f}%)"
+    over = phase in CYCLE_WINDOW_PHASES and pct > ALIGNMENT_WARN_PCT
+    if over:
+        line += (f"  WARNING: over {ALIGNMENT_WARN_PCT:.0f}% — the real checkpoint cycle is probably"
+                 " not 600 s; stop the campaign and report")
+    elif phase not in CYCLE_WINDOW_PHASES:
+        line += "  (720 s pilot window: not a check)"
+    return line, over
+
+
 def main(args):
+    if args[:1] == ["--alignment-check"]:
+        if len(args) < 3:
+            print(__doc__, file=sys.stderr)
+            return 2
+        phase, status = args[1], 0
+        for arg in args[2:]:
+            path, rows = load(arg)
+            line, over = alignment(phase, [r for r in rows if r.get("phase", "") == phase])
+            print(f"{path} phase={phase}: {line}")
+            if over:
+                status = 3
+        return status
     if not args:
         print(__doc__, file=sys.stderr)
         return 2
@@ -150,7 +194,11 @@ def main(args):
         for phase in sorted({r.get("phase", "") for r in rows}):
             in_phase = [r for r in rows if r.get("phase", "") == phase]
             steady = [r for r in in_phase if r.get("steady_state") in ("true", "n/a")]
-            for label, subset in (("steady-state runs", steady), ("all runs (sensitivity)", in_phase)):
+            steady_aligned = [r for r in steady if r.get("checkpoint_aligned") != "false"]
+            print(f"  phase={phase or '-'}  {alignment(phase, in_phase)[0]}")
+            for label, subset in (("steady-state runs", steady),
+                                  ("all runs (sensitivity)", in_phase),
+                                  ("steady-state runs without checkpoint_aligned=false (sensitivity)", steady_aligned)):
                 print(f"  phase={phase or '-'}  {label}:")
                 report(subset, "    ")
     return 0

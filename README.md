@@ -100,6 +100,13 @@ With as many rounds as configurations the order is a random Latin square:
 every configuration takes every position in a round once. Further rounds can
 be appended (`--first-round`, `--envs`); existing rounds are never redrawn.
 
+`scripts/run-campaign.sh [--last-round N]` then runs the sessions back to back
+in that order (5 runs each, phase `main`), logging each to
+`campaign/sessions.csv` and skipping the ones already done. It stops after a
+failed session, when over 20% of a configuration's runs miss the one-cycle
+window (`checkpoint_aligned = false`), or before the next session once
+`results/.campaign-stop` exists.
+
 ## Dry run
 
 `tests/dry-run/run.sh` runs whole sessions — burn-in, adaptive warm-up,

@@ -166,7 +166,9 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 ## Okno pomiaru = jeden cykl checkpointu (decyzja 2026-10-08, wdrożona 2026-10-09)
 
 - **Okno pomiaru 600 s** (`MEASURE_SECONDS`) = `checkpoint_timeout` (600 s, przeniesiony z PaaS GP — parytet). Okno obejmuje dokładnie jeden pełny cykl checkpointu, więc każda faza cyklu (zrzut brudnych stron, przerwa między checkpointami) jest w oknie dokładnie raz, a średnia z okna nie zależy od tego, w którym miejscu cyklu pomiar wystartował. Przy 720 s okno miało 1 albo 2 checkpointy zależnie od długości warm-upu (sesja 3 pilotażu: 2 checkpointy → 155–158 TPS, 1 → 168–185 TPS).
-- **Kontrola: kolumna `checkpoint_aligned`** w `summary.csv` = `true`, gdy między snapshotami `pg_stat_bgwriter` przed i po pomiarze Δ`checkpoints_timed` = 1 i Δ`checkpoints_req` = 0. `false` znaczy, że założenie nie zaszło (checkpoint wymuszony, np. przez `max_wal_size`, albo granica okna wypadła na start checkpointu → 0 lub 2 w oknie). Kolumna kontrolna: nie wchodzi do `steady_state`, `summarize.py` jej nie filtruje.
+- **Kontrola: kolumna `checkpoint_aligned`** w `summary.csv` = `true`, gdy między snapshotami `pg_stat_bgwriter` przed i po pomiarze Δ`checkpoints_timed` = 1 i Δ`checkpoints_req` = 0. `false` znaczy, że założenie nie zaszło (checkpoint wymuszony, np. przez `max_wal_size`, albo granica okna wypadła na start checkpointu → 0 lub 2 w oknie).
+- **`checkpoint_aligned = false` zostaje w głównej analizie** (decyzja 2026-10-09), plus osobna analiza wrażliwości bez tych przebiegów (`summarize.py`: „steady-state runs without checkpoint_aligned=false”). Uzasadnienie: `steady_state` wyklucza stan sztucznie wytworzony przez nasz protokół (kredyty odnowione w czasie resetu), a niezgodność z cyklem wynika z zachowania samego systemu (checkpoint dłuższy niż 600 s albo wymuszony przez wolumen WAL) albo z pomijalnego efektu brzegowego przy snapshotach. Wykluczanie przesunęłoby wynik w stronę jednej fazy cyklu.
+- **Sygnał ostrzegawczy:** jeśli w którejś konfiguracji `false` ma **ponad 20%** przebiegów (fazy z oknem 600 s: `main`, `explanatory`), zatrzymać się i zgłosić — prawdopodobnie realny okres cyklu ≠ 600 s. `summarize.py` wypisuje ten odsetek per konfiguracja i faza; `run-campaign.sh` sprawdza go po każdej sesji (`summarize.py --alignment-check main <env>`, kod 3) i sam zatrzymuje kampanię.
 - **Sprawdzenie na starcie sesji:** `init-db.sh` przed załadowaniem danych czyta `checkpoint_timeout` z `pg_settings` i przerywa (sesja idzie w teardown), jeśli wartość ≠ `MEASURE_SECONDS`; odczyt zapisany w `init-*.env` (`CHECKPOINT_TIMEOUT_S`).
 - **Nie wymuszamy `CHECKPOINT` przed pomiarem:** ustawiałby każdy przebieg w sztucznej fazie (tuż po zrzuceniu wszystkich brudnych stron), której przy ciągłej pracy nie ma — pomiar opisywałby stan, którego konfiguracja nie utrzymuje, wbrew zasadzie, na której stoi burn-in i kryterium stanu ustalonego.
 - Pilotaż (okno 720 s) przeliczony z nową kolumną, informacyjnie: `checkpoint_aligned` premium t/t/f/t/t, GP f/f/t/t/t, E20 t/t/f/t/f (przebiegi 3 i 5 to te z 2 checkpointami), B1ms f/f/t/t/t.
@@ -179,6 +181,8 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 - **`session_id`** w `summary.csv` (i `SESSION_ID` w `meta.env`) = znacznik czasu UTC `init-db.sh` danego wcielenia (`results/<env>/init-<session_id>.env`); dla przebiegów sprzed tej zmiany wyprowadzany z najnowszego `init-*.env` sprzed startu obciążenia. Jest zarazem zapisem startu sesji (pora dnia).
 
 ## Plan kampanii (Faza 4) — ustalony 2026-10-09, przed startem
+
+Doprecyzowania (reguła zatrzymania na TPS, dolosowanie dodatkowych sesji tym samym skryptem, raport osiągniętej precyzji po 6 sesjach) zaakceptowane 2026-10-09.
 
 - **Cel:** 95% CI średniego TPS każdej konfiguracji (po sesjach) w granicach **±5% średniej**. Najmniejsza różnica między konfiguracjami to ~30–40% (pilotaż: P20 o 31% poniżej GP, B1ms o 27% poniżej E20), więc ±5% rozstrzyga każde porównanie z dużym zapasem. Średnia latencja przy stałych 25 klientach to 25/TPS (prawo Little'a), więc jej względny CI jest praktycznie ten sam co TPS.
 - **Start:** 4 rundy × 4 konfiguracje = 16 sesji, każda `scripts/run-session.sh <env> 5 --phase main`.
@@ -197,6 +201,7 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 - **Pilotaż** (okno 720 s, inny protokół) **nie wchodzi do danych ani do analizy** — faza `pilot`, `summarize.py` raportuje fazy osobno.
 - **Bez osobnego ponownego pilotażu E20** — reguła zatrzymania to pokrywa.
 - **Przed kampanią:** sesja eksperymentu wyjaśniającego `scripts/run-session.sh iaas-premium-ssd-readcache 5` (faza `explanatory`, już z oknem 600 s).
+- **Wykonanie:** `scripts/run-campaign.sh [--last-round N]` puszcza sesje jedna po drugiej w kolejności z `campaign/round-order.csv` (`run-session.sh <env> 5 --phase main`) i dopisuje każdą zakończoną do `campaign/sessions.csv` (runda, pozycja, konfiguracja, `session_id`, start, koniec, kod wyjścia) — to zapis faktycznych pór sesji. Sesje z kodem 0 są pomijane przy ponownym uruchomieniu. Zatrzymuje się: po nieudanej sesji (ponowne uruchomienie ją powtarza), po przekroczeniu progu 20% `checkpoint_aligned = false`, przed kolejną sesją, jeśli istnieje `results/.campaign-stop` (łagodne zatrzymanie: `touch`), i po bieżącej sesji na SIGTERM/SIGHUP.
 
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
@@ -372,8 +377,10 @@ azure-postgres-iaas-paas-benchmark/
 │   ├── run-session.sh <env> <N>   # cała sesja: IP → apply → init-db → burn-in → N przebiegów → teardown (pułapka: --force)
 │   ├── summarize.py <env>         # średnie sesji → k, średnia, SD, 95% CI (t, df = k − 1) — stan ustalony i wszystkie
 │   ├── draw-campaign.py           # losowanie kolejności rund kampanii → campaign/round-order.csv
+│   ├── run-campaign.sh            # sesje kampanii jedna po drugiej według round-order.csv → campaign/sessions.csv
 │   └── lib/run_stats.py           # percentyle latencji, TPS 3 min, delty pg_stat_* (dla collect-results)
-├── campaign/round-order.csv      # wylosowana kolejność rund kampanii (ziarno, data, metoda)
+├── campaign/                     # round-order.csv: wylosowana kolejność rund (ziarno, data, metoda);
+│                                  # sessions.csv: faktyczny przebieg kampanii (run-campaign.sh)
 ├── tests/dry-run/                # run.sh + fałszywe ssh/terraform/az/psql/pgbench: całe sesje bez Azure
 ├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
 │   └── _archive/                  # pilotaż 128 GB i sanity checki — poza zbiorem danych
@@ -417,7 +424,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - **Faza 3 — ZAMKNIĘTA (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi); wnioski 2026-10-09: okno pomiaru 600 s, sesja jako jednostka statystyczna, plan kampanii z regułą zatrzymania. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
-- **Faza 4 — następna:** sesja eksperymentu wyjaśniającego, potem kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
+- **Faza 4 — W TOKU (start 2026-10-09 wieczorem):** sesja eksperymentu wyjaśniającego, potem kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
 - Faza 5: analiza wyników + rozdział 5
 - Faza 6: rozdział 6 (wnioski)
 - Faza 7: redakcja, poprawki promotora, złożenie w APD
