@@ -410,7 +410,10 @@ steady_state() {
 burn_in_pools() {
   case "$1" in
   paas-burstable)
-    echo "cpu_credits_remaining|balance|0|until_spent"
+    # Spent at <= 1, not 0: once the credits run out the published metric
+    # stays at 1.0 while the CPU is throttled (pilot, 2026-10-09). The same
+    # threshold as the steady-state criterion (STEADY_CPU_CREDITS_SPENT_MAX).
+    echo "cpu_credits_remaining|balance|1|until_spent"
     ;;
   iaas-*)
     echo "Data Disk Used Burst IO Credits Percentage|used|99|while_draining"

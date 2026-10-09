@@ -69,7 +69,7 @@ Każdy SKU w macierzy mierzy coś na saldzie kredytów, więc wynik przebiegu za
   - **Jeden standardowy przebieg NIE drenuje puli.** ~14 min obciążenia (warm-up + pomiar) to za mało: pula wystarcza na ~30 min przy maksymalnym burście, a pierwszy test zużył 17% na 12 min.
   - **Zasada ogólna (ustalona 2026-10-07): burn-in trwa, aż wyczerpią się wszystkie pule kredytów, które pod tym obciążeniem się wyczerpują; minimum 60 min.** Uzasadnienie: mierzymy stan, który konfiguracja utrzyma **bez końca** pod tym obciążeniem. Na IaaS CPU w stanie ustalonym pracuje poniżej poziomu bazowego, więc „kredyty CPU > 0” trwa dowolnie długo, a jedyną wyczerpującą się pulą jest pula dysku; na B1ms CPU (31–38%) pracuje powyżej poziomu bazowego, więc „kredyty > 0” to stan przejściowy, a utrzymywalny jest dopiero stan po ich wyczerpaniu.
   - **Protokół `run-benchmark.sh --burn-in`** (pierwszy przebieg po `init-db.sh`): ciągły pgbench — bez warm-upu, bez `-l`, bez VACUUM, nieliczony do wyników — i **od razu, w tym samym wywołaniu**, pierwszy przebieg pomiarowy. GP: stałe **60 min** (`BURN_IN_SECONDS`) — nie ma puli, która by się wyczerpywała. Pozostałe konfiguracje: **burn-in adaptacyjny** (`burn_in_pools` w `scripts/lib/common.sh`) — pgbench startuje z limitem bezpieczeństwa **4 h** (`BURN_IN_MAX_SECONDS`), a co **5 min** (bez przerywania obciążenia) skrypt czyta pule z Azure Monitor:
-    - **B1ms (`paas-burstable`), tryb `until_spent`:** `cpu_credits_remaining` zawsze się wyczerpuje — burn-in trwa, aż odczyt pokaże 0.
+    - **B1ms (`paas-burstable`), tryb `until_spent`:** `cpu_credits_remaining` zawsze się wyczerpuje — burn-in trwa, aż odczyt pokaże **≤ 1** (ten sam próg co kryterium; po wyczerpaniu kredytów metryka zatrzymuje się na 1,0, nie na 0 — poprawione 2026-10-09 po sesji 4 pilotażu).
     - **IaaS (wszystkie środowiska `iaas-*`), tryb `while_draining`:** pula dysku (`Data Disk Used Burst IO Credits Percentage`) i kredyty CPU VM (`CPU Credits Remaining`) — burn-in trwa, dopóki któraś z nich wciąż się wyczerpuje (zmiana w stronę wyczerpania w ostatnich 15 min większa niż 1 p.p. dla dysku / 0,5 kredytu dla CPU), aż każda będzie wyczerpana albo się ustabilizuje. Przy wyższym CPU (np. z cache odczytu) `B2s_v2` może zacząć zużywać kredyty CPU — wtedy burn-in ciągnie się do ich wyczerpania; na głównych konfiguracjach IaaS kredyty CPU w stanie ustalonym rosną, więc burn-in kończy się po ~60 min (P20 drenuje dysk po ~46 min; 35 min nie wystarczyło, sanity check `iaas-premium-ssd`).
     - Pula odczytana jako wyczerpana dostaje jeszcze **10 min** zapasu na lag metryki; burn-in kończy się po co najmniej 60 min, gdy wszystkie pule są „wyczerpane” lub „stabilne”. `meta.env` burn-inu zapisuje `BURN_IN_STOP=done|limit` i `BURN_IN_POOLS` (końcowy stan każdej puli). Log postępu burn-inu (`-P 60`, `summary.txt` w katalogu `burnin-*`) jest zachowywany i archiwizowany — to dane o fazie burstu do osobnego opisu w rozdz. 5. Między burn-inem a pomiarem nie może być bezczynności, bo właśnie w bezczynności dysk odbudowuje kredyty: E20 (500 bazowo / 600 burst) ma pulę ~180 tys. IO odnawianą tempem ~500 IO/s, więc jest pełna po ~6 min; 300 s czekania na Azure Monitor odbudowałoby ~80% puli (P20: ~30%). Dlatego raport burn-inu (tabela per minuta, `burnin-metrics.txt`) liczy się **w tle** po lagu ingestii (300 s), a wypisuje na końcu wywołania. IaaS: `Data Disk Used Burst IO Credits Percentage` obok IOPS odczytu/zapisu (i ich sumy), `Data Disk IOPS Consumed Percentage` oraz `CPU Credits Remaining` i `Percentage CPU` — przy wyższym TPS na Premium VM może dojść do granicy CPU, a `B2s_v2` ma kredyty CPU.
   - **Burn-in na wszystkich 4 konfiguracjach** — jednolity protokół, także tam, gdzie dysk nie burstuje; na B1ms drenuje kredyty CPU.
@@ -136,6 +136,33 @@ Wszystkie 5 (n = 5): **TPS średnia 1383,7; SD 7,0; 95% CI ±8,7 (t, df = 4)**; 
 n = 5: **TPS średnia 168,5; SD 12,3; 95% CI ±15,2 (t, df = 4)**; latencja średnia 149,0 ms, SD 10,8, 95% CI ±13,3; p99 średnia 412,6 ms, SD 18,4, 95% CI ±22,9. CPU ~9% — czysto dyskowe ograniczenie.
 
 - **[DECYZJA] Checkpoint dominuje rozrzut na E20.** Checkpoint czasowy (co 10 min, ~900 MB zapisu) zabiera ~360 z ~500 IOPS dysku: odczyty spadają z ~460 do ~195 IOPS, TPS z ~330 do ~130 na ~9 min. Faza cyklu względem startu pomiaru zależy od długości warm-upu: przebiegi z długim warm-upem (493 i 555 s) zaczęły się w trakcie checkpointu i miały w oknie 2 checkpointy (155 i 158 TPS), pozostałe 1 (168–185 TPS). Rozrzut wynika więc w dużej mierze z fazy checkpointu, nie z platformy. Na P20 i GP tego efektu nie widać (checkpoint nie wyczerpuje tam budżetu I/O). Propozycja: `CHECKPOINT` tuż przed każdym pomiarem (na PaaS do sprawdzenia uprawnienia — w PG16 rola `pg_checkpoint`).
+
+## Pilotaż — sesja 4: `paas-burstable` (2026-10-09)
+
+`run-session.sh paas-burstable 5` (10:57–18:22): init-db 24 min 49 s; **burn-in 240 min (limit bezpieczeństwa)** — kredyty CPU wyczerpały się ok. 214. minuty, ale metryka zatrzymała się na **1,0**, a burn-in czekał na 0 (niespójność z kryterium ≤ 1 — błąd w kodzie, poprawiony: burn-in B1ms kończy się teraz przy ≤ 1). Moment wyczerpania widać w danych: TPS ~230 → ~110, `cpu_percent` ~30% → ~90% (liczone względem przyciętej mocy). **Reset po burn-inie 61 min** — VACUUM ograniczony przez przycięte CPU (88–100%), kredyty się w tym czasie nie odnawiały. Warm-upy stałe 120 s (przez niespójność progów burn-in nie zapisał puli jako wyczerpanej), ale kredyty stały na 1,0 przez wszystkie okna pomiaru, więc **wszystkie 5 przebiegów spełnia kryterium**. Kolejne resety ~6 min. Dane: `results/paas-burstable/summary.csv`.
+
+| przebieg | TPS | latencja śr. [ms] | p99 [ms] | CPU śr. | `iops` śr. |
+|---|---|---|---|---|---|
+| 1 | 119,9 | 208,3 | 1040,7 | 78% | 539 |
+| 2 | 127,8 | 195,5 | 999,2 | 77% | 547 |
+| 3 | 121,2 | 206,3 | 1019,3 | 81% | 494 |
+| 4 | 132,8 | 188,1 | 980,2 | 77% | 546 |
+| 5 | 111,3 | 224,5 | 1050,2 | 82% | 496 |
+
+n = 5: **TPS średnia 122,6; SD 8,2; 95% CI ±10,2 (t, df = 4)**; latencja średnia 204,5 ms, SD 13,8, 95% CI ±17,2; p99 średnia 1017,9 ms, SD 28,9, 95% CI ±35,9. Obserwacja: w każdym przebiegu jedna minuta z krótkim zrywem (~190–280 TPS) w przypadkowym momencie — najpewniej kredyt odkładany i od razu zużywany w stanie wyczerpanym; to część stanu utrzymywalnego B1ms.
+
+## Pilotaż — podsumowanie i liczba powtórzeń N (2026-10-09)
+
+| konfiguracja | n | TPS średnia | SD | CV | N dla 95% CI ≤ ±2% / ±3% / ±5% średniej |
+|---|---|---|---|---|---|
+| iaas-premium-ssd | 3 | 957,8 | 9,1 | 0,95% | 4 / 3 / 3 |
+| paas-general-purpose | 5 | 1383,7 | 7,0 | 0,51% | 3 / 3 / 2 |
+| iaas-standard-ssd | 5 | 168,5 | 12,3 | 7,28% | 54 / 26 / 11 |
+| paas-burstable | 5 | 122,6 | 8,2 | 6,67% | 46 / 22 / 10 |
+
+N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·SD/√n ≤ cel·średnia. Konfiguracje ograniczone przez CPU (GP) i przez dysk z zapasem I/O (P20) mają rozrzut < 1%, ograniczone przez mały budżet zasobu (E20 — checkpoint; B1ms — przycięte CPU) ~7%.
+- **[DECYZJA] docelowa precyzja → N** (wspólne N dla wszystkich konfiguracji wyznacza najgorsza, E20).
+- **[DECYZJA] `CHECKPOINT` przed pomiarem** (sesja 3) — jeśli przyjęty, rozrzut E20 powinien spaść i N razem z nim; wtedy warto zmierzyć krótki pilotaż E20 jeszcze raz.
 
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
@@ -352,7 +379,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
 - **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
-- **Faza 3 — W TOKU (start 2026-10-07)**: pilotaż (5×4 przebiegi) → wyliczenie N. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
+- **Faza 3 — POMIARY ZAKOŃCZONE (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi) → wyliczenie N (tabela w "Pilotaż — podsumowanie"; czeka na decyzję o docelowej precyzji i `CHECKPOINT`). Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
 - Faza 4: właściwe pomiary (N×4, randomizacja)
 - Faza 5: analiza wyników + rozdział 5
 - Faza 6: rozdział 6 (wnioski)
