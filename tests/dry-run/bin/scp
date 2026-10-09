@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake scp: copies between the local tree and the fake remote home.
+args=(); while [ $# -gt 0 ]; do case "$1" in -i|-o) shift 2 ;; -*) shift ;; *) args+=("$1"); shift ;; esac; done
+map() { case "$1" in *@*:*) echo "$DRYRUN/remote-home/${1#*:}" ;; *) echo "$1" ;; esac; }
+echo "[scp] ${args[0]} -> ${args[1]}" >>"$DRYRUN/calls.log"; cp -r "$(map "${args[0]}")" "$(map "${args[1]}")"

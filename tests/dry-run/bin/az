@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+# Fake az: metric definitions, per-minute series (random, or linear per metric
+# via FAKE_LINEAR='{"name": [from, to]}', or FAKE_CREDITS for the Burstable
+# credits; FAKE_NODATA_MINUTE=1 injects Azure's empty minute with minimum 0.0),
+# storage key/upload and resource-group checks.
+import json, os, sys, random
+from datetime import datetime, timedelta, timezone
+a = sys.argv[1:]
+with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[az] " + " ".join(a)[:200] + "\n")
+opt = lambda n: a[a.index(n) + 1] if n in a else None
+def multi(n):
+    i = a.index(n) + 1; out = []
+    while i < len(a) and not a[i].startswith("--"): out.append(a[i]); i += 1
+    return out
+IAAS = ["Percentage CPU", "CPU Credits Remaining", "Available Memory Bytes", "Data Disk Read Operations/Sec", "Data Disk Write Operations/Sec",
+        "Data Disk Queue Depth", "Data Disk Latency", "Data Disk IOPS Consumed Percentage", "VM Uncached IOPS Consumed Percentage",
+        "Data Disk Used Burst IO Credits Percentage", "Data Disk Used Burst BPS Credits Percentage"]
+PAAS = ["cpu_percent", "memory_percent", "iops", "read_iops", "write_iops", "disk_queue_depth", "disk_iops_consumed_percentage", "storage_percent", "cpu_credits_remaining"]
+drop = set(filter(None, os.environ.get("FAKE_AZ_DROP", "").split(",")))
+if a[:3] == ["monitor", "metrics", "list-definitions"]:
+    names = IAAS if "virtualMachines" in opt("--resource") else PAAS
+    print("\n".join(n for n in names if n not in drop)); sys.exit(0)
+if a[:3] == ["monitor", "metrics", "list"]:
+    names = multi("--metric")
+    st = datetime.fromisoformat(opt("--start-time").replace("Z", "+00:00"))
+    en = datetime.fromisoformat(opt("--end-time").replace("Z", "+00:00")) if opt("--end-time") else datetime.now(timezone.utc)
+    step = timedelta(minutes=5 if opt("--interval") == "PT5M" else 1)
+    lin = json.loads(os.environ.get("FAKE_LINEAR", "{}")); gap = os.environ.get("FAKE_NODATA_MINUTE") == "1"
+    value = []
+    for n in names:
+        pts = []; t = st
+        while t < en:
+            v = random.uniform(10, 90); pts.append({"timeStamp": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "average": v, "maximum": v + 5, "minimum": v - 5}); t += step
+        v = random.uniform(10, 90); pts.append({"timeStamp": en.strftime("%Y-%m-%dT%H:%M:%SZ"), "average": v, "maximum": v + 5, "minimum": v - 5})
+        if n in lin:
+            x, y = lin[n]; k = max(len(pts) - 1, 1)
+            pts = [dict(p, average=x + (y - x) * i / k, maximum=x + (y - x) * i / k, minimum=x + (y - x) * i / k) for i, p in enumerate(pts)]
+        if n == "cpu_credits_remaining" and os.environ.get("FAKE_CREDITS"):
+            c = float(os.environ["FAKE_CREDITS"]); pts = [dict(p, average=c, maximum=c, minimum=c) for p in pts]
+        if gap and len(pts) > 2: pts[1] = {"timeStamp": pts[1]["timeStamp"], "minimum": 0.0}
+        if n in drop: pts = [{"timeStamp": p["timeStamp"]} for p in pts]
+        value.append({"name": {"value": n}, "timeseries": [{"data": pts}]})
+    print(json.dumps({"value": value})); sys.exit(0)
+if a[:3] == ["storage", "account", "keys"]: print("fakekey=="); sys.exit(0)
+if a[:3] in (["storage", "blob", "upload-batch"], ["storage", "blob", "upload"]):
+    with open(os.environ["DRYRUN"] + "/uploaded.log", "a") as f: f.write(" ".join(a[:3]) + " " + str(opt("--destination-path") or opt("--name")) + "\n")
+    sys.exit(0)
+if a[:2] == ["group", "exists"]: print("false"); sys.exit(0)
+print("fake az: unhandled " + " ".join(a), file=sys.stderr); sys.exit(1)

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# Fake psql: canned answers for every query the scripts send. Cumulative
+# counters grow by one step per snapshot, so a measured window holds exactly
+# one timed checkpoint; FAKE_CHECKPOINTS_REQ=1 adds a requested one per
+# snapshot, FAKE_CHECKPOINT_TIMEOUT changes the reported checkpoint_timeout.
+import os, sys
+a = sys.argv[1:]
+with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[psql] " + " ".join(a)[:150] + "\n")
+cmds = [a[i + 1] for i, x in enumerate(a) if x == "-c"]
+k = 0
+if not cmds:
+    cnt = os.path.join(os.environ["HOME"], ".psql_snapshots")
+    k = int(open(cnt).read()) if os.path.exists(cnt) else 0
+    open(cnt, "w").write(str(k + 1))
+req = k if os.environ.get("FAKE_CHECKPOINTS_REQ") == "1" else 0
+def io_rows(k):
+    rows = ["backend_type,object,context,reads,read_time,writes,write_time,writebacks,writeback_time,extends,extend_time,op_bytes,hits,evictions,reuses,fsyncs,fsync_time,stats_reset"]
+    for bt, ctx, base in (("client backend", "normal", 1000), ("checkpointer", "normal", 50)):
+        rows.append(f"{bt},relation,{ctx},{base*k},{base*k*0.5},{base*k//2},{base*k*0.25},0,0,0,0,8192,{base*k*20},0,,0,0,2026-10-01 00:00:00+00")
+    rows.append("checkpointer,relation,bulkread,,,,,,,,,8192,,,,0,0,2026-10-01 00:00:00+00")
+    return rows
+if not cmds:
+    out = None
+    for line in sys.stdin:
+        line = line.strip()
+        if line.startswith("\\o "): out = open(line[3:], "w"); continue
+        if not line: continue
+        if "pg_stat_io" in line: out.write("snapshot_at," + "\n2026-10-07 10:00:00+00,".join(io_rows(k)) + "\n")
+        elif "pg_stat_database" in line: out.write(f"snapshot_at,datid,datname,blks_read,blks_hit\n2026-10-07 10:00:00+00,16384,pgbench_db,{k*1000},{k*99000}\n")
+        elif "pg_stat_bgwriter" in line: out.write(f"snapshot_at,checkpoints_timed,checkpoints_req\n2026-10-07 10:00:00+00,{k},{req}\n")
+    sys.exit(0)
+for c in cmds:
+    if "checkpoint_timeout" in c: print(os.environ.get("FAKE_CHECKPOINT_TIMEOUT", "600"))
+    elif "server_version" in c: print('server_version,version\n16.4,"PostgreSQL 16.4 on x86_64-pc-linux-gnu, compiled by gcc, 64-bit"')
+    elif "pg_stat_ssl" in c: print("pid,ssl,version,cipher,bits,client_dn,client_serial,issuer_dn\n4242,t,TLSv1.3,TLS_AES_256_GCM_SHA384,256,,,")
+    elif "pg_database_size" in c: print("15688203287")
+    elif "TRUNCATE" in c: print("TRUNCATE TABLE")
+    elif "VACUUM" in c: print("VACUUM")
+    else: print("fake psql: unhandled", c, file=sys.stderr); sys.exit(1)

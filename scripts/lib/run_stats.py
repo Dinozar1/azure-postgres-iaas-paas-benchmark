@@ -42,11 +42,12 @@ COLUMNS = [
     "io_write_time_ms",
     "checkpoints_timed",
     "checkpoints_req",
+    "checkpoint_aligned",
 ]
 
 PERCENTILES = [("lat_p50_ms", 50), ("lat_p95_ms", 95), ("lat_p99_ms", 99), ("lat_p999_ms", 99.9)]
 EDGE_WINDOW_S = 180  # the "first / last 3 minutes" of the measured run
-DEFAULT_DURATION_S = 720
+DEFAULT_DURATION_S = 600
 
 
 def open_text(path):
@@ -172,6 +173,10 @@ def pg_stat_deltas(run_dir):
         before, after = pair[0][0], pair[1][0]
         for col in ("checkpoints_timed", "checkpoints_req"):
             out[col] = f"{num(after[col]) - num(before[col]):.0f}"
+        # The window is one checkpoint cycle: aligned means exactly one timed
+        # checkpoint in it and no requested (WAL-volume) one.
+        aligned = out["checkpoints_timed"] == "1" and out["checkpoints_req"] == "0"
+        out["checkpoint_aligned"] = "true" if aligned else "false"
 
     return out
 

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fake curl: a fixed public IP.
+echo "[curl] $*" >>"$DRYRUN/calls.log"
+printf 198.51.100.7

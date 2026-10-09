@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake terraform: fixed outputs per environment, init/apply/destroy logged.
+dir="${1#-chdir=}"; shift; env="$(basename "$dir")"
+case "$1" in
+output) case "$env:$3" in
+  iaas-*:db_vm_private_ip) printf 10.0.1.5 ;;
+  iaas-*:db_vm_public_ip) printf 203.0.113.20 ;;
+  *:client_vm_public_ip) printf 203.0.113.10 ;;
+  iaas-*:metrics_resource_id) printf "/subscriptions/0000/resourceGroups/rg-$env/providers/Microsoft.Compute/virtualMachines/vm-$env-db" ;;
+  paas-*:db_fqdn) printf psql-x.postgres.database.azure.com ;;
+  paas-*:db_admin_login) printf pgbenchadmin ;;
+  paas-*:db_name) printf pgbench_db ;;
+  paas-*:metrics_resource_id) printf "/subscriptions/0000/resourceGroups/rg-$env/providers/Microsoft.DBforPostgreSQL/flexibleServers/psql-x" ;;
+  *) echo "fake terraform: unknown output $3" >&2; exit 1 ;; esac ;;
+init|apply) echo "[terraform] $1 $env" | tee -a "$DRYRUN/calls.log" ;;
+destroy) echo "[terraform] destroy $env" | tee -a "$DRYRUN/calls.log"; echo "Destroy complete! Resources: 9 destroyed." ;;
+*) echo "fake terraform: unsupported $*" >&2; exit 1 ;;
+esac

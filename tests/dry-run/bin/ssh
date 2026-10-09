@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake ssh: runs the remote command locally, in a fake remote home.
+while [ $# -gt 0 ]; do case "$1" in -i|-o) shift 2 ;; -*) shift ;; *) break ;; esac; done
+shift
+echo "[ssh] $*" | cut -c1-120 >>"$DRYRUN/calls.log"
+cd "$DRYRUN/remote-home" && HOME="$DRYRUN/remote-home" exec bash -c "$*"

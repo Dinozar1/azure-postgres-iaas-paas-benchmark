@@ -135,7 +135,7 @@ Wszystkie 5 (n = 5): **TPS średnia 1383,7; SD 7,0; 95% CI ±8,7 (t, df = 4)**; 
 
 n = 5: **TPS średnia 168,5; SD 12,3; 95% CI ±15,2 (t, df = 4)**; latencja średnia 149,0 ms, SD 10,8, 95% CI ±13,3; p99 średnia 412,6 ms, SD 18,4, 95% CI ±22,9. CPU ~9% — czysto dyskowe ograniczenie.
 
-- **[DECYZJA] Checkpoint dominuje rozrzut na E20.** Checkpoint czasowy (co 10 min, ~900 MB zapisu) zabiera ~360 z ~500 IOPS dysku: odczyty spadają z ~460 do ~195 IOPS, TPS z ~330 do ~130 na ~9 min. Faza cyklu względem startu pomiaru zależy od długości warm-upu: przebiegi z długim warm-upem (493 i 555 s) zaczęły się w trakcie checkpointu i miały w oknie 2 checkpointy (155 i 158 TPS), pozostałe 1 (168–185 TPS). Rozrzut wynika więc w dużej mierze z fazy checkpointu, nie z platformy. Na P20 i GP tego efektu nie widać (checkpoint nie wyczerpuje tam budżetu I/O). Propozycja: `CHECKPOINT` tuż przed każdym pomiarem (na PaaS do sprawdzenia uprawnienia — w PG16 rola `pg_checkpoint`).
+- **Checkpoint dominuje rozrzut na E20** (rozstrzygnięte — sekcja "Okno pomiaru = jeden cykl checkpointu"). Checkpoint czasowy (co 10 min, ~900 MB zapisu) zabiera ~360 z ~500 IOPS dysku: odczyty spadają z ~460 do ~195 IOPS, TPS z ~330 do ~130 na ~9 min. Faza cyklu względem startu pomiaru zależy od długości warm-upu: przebiegi z długim warm-upem (493 i 555 s) zaczęły się w trakcie checkpointu i miały w oknie 2 checkpointy (155 i 158 TPS), pozostałe 1 (168–185 TPS). Rozrzut wynika więc w dużej mierze z fazy checkpointu, nie z platformy. Na P20 i GP tego efektu nie widać (checkpoint nie wyczerpuje tam budżetu I/O). Rozważany `CHECKPOINT` przed pomiarem odrzucony; zamiast niego okno 600 s = jeden cykl checkpointu.
 
 ## Pilotaż — sesja 4: `paas-burstable` (2026-10-09)
 
@@ -161,8 +161,42 @@ n = 5: **TPS średnia 122,6; SD 8,2; 95% CI ±10,2 (t, df = 4)**; latencja śred
 | paas-burstable | 5 | 122,6 | 8,2 | 6,67% | 46 / 22 / 10 |
 
 N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·SD/√n ≤ cel·średnia. Konfiguracje ograniczone przez CPU (GP) i przez dysk z zapasem I/O (P20) mają rozrzut < 1%, ograniczone przez mały budżet zasobu (E20 — checkpoint; B1ms — przycięte CPU) ~7%.
-- **[DECYZJA] docelowa precyzja → N** (wspólne N dla wszystkich konfiguracji wyznacza najgorsza, E20).
-- **[DECYZJA] `CHECKPOINT` przed pomiarem** (sesja 3) — jeśli przyjęty, rozrzut E20 powinien spaść i N razem z nim; wtedy warto zmierzyć krótki pilotaż E20 jeszcze raz.
+- **Rozstrzygnięte 2026-10-09:** tabela wyżej liczy przebiegi jako niezależne próby, a nimi nie są — jednostką statystyczną jest **sesja** (sekcja "Jednostka statystyczna: sesja"), więc N z tabeli opisuje tylko rozrzut wewnątrz jednej sesji i nie wyznacza liczby powtórzeń. Liczbę sesji wyznacza reguła zatrzymania (sekcja "Plan kampanii"). `CHECKPOINT` przed pomiarem odrzucony, okno 600 s (sekcja "Okno pomiaru = jeden cykl checkpointu"); osobnego ponownego pilotażu E20 nie ma — pokrywa to reguła zatrzymania.
+
+## Okno pomiaru = jeden cykl checkpointu (decyzja 2026-10-08, wdrożona 2026-10-09)
+
+- **Okno pomiaru 600 s** (`MEASURE_SECONDS`) = `checkpoint_timeout` (600 s, przeniesiony z PaaS GP — parytet). Okno obejmuje dokładnie jeden pełny cykl checkpointu, więc każda faza cyklu (zrzut brudnych stron, przerwa między checkpointami) jest w oknie dokładnie raz, a średnia z okna nie zależy od tego, w którym miejscu cyklu pomiar wystartował. Przy 720 s okno miało 1 albo 2 checkpointy zależnie od długości warm-upu (sesja 3 pilotażu: 2 checkpointy → 155–158 TPS, 1 → 168–185 TPS).
+- **Kontrola: kolumna `checkpoint_aligned`** w `summary.csv` = `true`, gdy między snapshotami `pg_stat_bgwriter` przed i po pomiarze Δ`checkpoints_timed` = 1 i Δ`checkpoints_req` = 0. `false` znaczy, że założenie nie zaszło (checkpoint wymuszony, np. przez `max_wal_size`, albo granica okna wypadła na start checkpointu → 0 lub 2 w oknie). Kolumna kontrolna: nie wchodzi do `steady_state`, `summarize.py` jej nie filtruje.
+- **Sprawdzenie na starcie sesji:** `init-db.sh` przed załadowaniem danych czyta `checkpoint_timeout` z `pg_settings` i przerywa (sesja idzie w teardown), jeśli wartość ≠ `MEASURE_SECONDS`; odczyt zapisany w `init-*.env` (`CHECKPOINT_TIMEOUT_S`).
+- **Nie wymuszamy `CHECKPOINT` przed pomiarem:** ustawiałby każdy przebieg w sztucznej fazie (tuż po zrzuceniu wszystkich brudnych stron), której przy ciągłej pracy nie ma — pomiar opisywałby stan, którego konfiguracja nie utrzymuje, wbrew zasadzie, na której stoi burn-in i kryterium stanu ustalonego.
+- Pilotaż (okno 720 s) przeliczony z nową kolumną, informacyjnie: `checkpoint_aligned` premium t/t/f/t/t, GP f/f/t/t/t, E20 t/t/f/t/f (przebiegi 3 i 5 to te z 2 checkpointami), B1ms f/f/t/t/t.
+
+## Jednostka statystyczna: sesja (decyzja 2026-10-09)
+
+- **Sesja** = jedno wcielenie środowiska (`apply` → … → `destroy`): inny host fizyczny, inny dysk, inny serwer PaaS. Przebiegi w sesji dzielą to wcielenie, więc nie są niezależnymi próbami konfiguracji — ich rozrzut mierzy powtarzalność pomiaru na jednej instancji, nie zmienność konfiguracji w chmurze. Przedział ufności z przebiegów byłby za wąski (pseudoreplikacja).
+- Sygnał z danych: GP w pilotażu 1383,7 TPS z 95% CI w sesji ±8,7, a sanity check (inne wcielenie, ten sam SKU) 1346,0 — poza tym przedziałem. Protokół sanity checku był inny (burn-in 35 min, jeden przebieg), więc to sygnał, nie dowód.
+- **Analiza** (`scripts/summarize.py`): średnia przebiegów w sesji → średnie sesji → średnia konfiguracji, SD średnich sesji i 95% CI z rozkładu t po sesjach (**df = k − 1**, k = liczba sesji). SD wewnątrz sesji raportowane wyłącznie opisowo. Osobno przebiegi w stanie ustalonym i wszystkie (analiza wrażliwości).
+- **`session_id`** w `summary.csv` (i `SESSION_ID` w `meta.env`) = znacznik czasu UTC `init-db.sh` danego wcielenia (`results/<env>/init-<session_id>.env`); dla przebiegów sprzed tej zmiany wyprowadzany z najnowszego `init-*.env` sprzed startu obciążenia. Jest zarazem zapisem startu sesji (pora dnia).
+
+## Plan kampanii (Faza 4) — ustalony 2026-10-09, przed startem
+
+- **Cel:** 95% CI średniego TPS każdej konfiguracji (po sesjach) w granicach **±5% średniej**. Najmniejsza różnica między konfiguracjami to ~30–40% (pilotaż: P20 o 31% poniżej GP, B1ms o 27% poniżej E20), więc ±5% rozstrzyga każde porównanie z dużym zapasem. Średnia latencja przy stałych 25 klientach to 25/TPS (prawo Little'a), więc jej względny CI jest praktycznie ten sam co TPS.
+- **Start:** 4 rundy × 4 konfiguracje = 16 sesji, każda `scripts/run-session.sh <env> 5 --phase main`.
+- **Kolejność:** w rundzie losowa, wylosowana przed startem skryptem `scripts/draw-campaign.py --seed 20261009 --rounds 4` i zapisana w `campaign/round-order.csv` (z ziarnem, datą losowania i metodą). Metoda: losowy kwadrat łaciński — każda konfiguracja raz na każdej pozycji w rundzie, więc efekt pozycji (i pory dnia) rozkłada się równo. Skrypt odmawia ponownego losowania istniejących rund.
+
+| runda | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| 1 | iaas-premium-ssd | iaas-standard-ssd | paas-burstable | paas-general-purpose |
+| 2 | paas-general-purpose | paas-burstable | iaas-standard-ssd | iaas-premium-ssd |
+| 3 | iaas-standard-ssd | paas-general-purpose | iaas-premium-ssd | paas-burstable |
+| 4 | paas-burstable | iaas-premium-ssd | paas-general-purpose | iaas-standard-ssd |
+
+- **Pory dnia rotowane** między rundami; start każdej sesji jest zapisany (`session_id`, log `session-<czas>.log`, `measure_start` każdego przebiegu). Jeśli B1ms (najdłuższa sesja — w pilotażu ~7,5 h, burn-in do 4 h) w praktyce zawsze idzie nocą, zapisać to jako ograniczenie (rozdz. 6).
+- **Reguła zatrzymania:** po 4 rundach każda konfiguracja, której 95% CI TPS jest szerszy niż ±5% średniej, dostaje kolejne sesje — maksymalnie do **6 sesji**. Decyzja **wyłącznie na podstawie szerokości CI** (`summarize.py` wypisuje „within” / „WIDER than ±5%”), nigdy wartości średnich. Kolejność dodatkowych rund losowana tym samym skryptem i dopisywana do tego samego pliku: `draw-campaign.py --seed <nowe ziarno> --first-round 5 --rounds 1 --envs <konfiguracje>`. Jeśli po 6 sesjach CI nadal jest szerszy, raportujemy osiągniętą precyzję.
+- Rachunek pomocniczy: przy k = 4 (t = 3,182) ±5% wymaga CV średnich sesji ≤ 3,1%, przy k = 6 (t = 2,571) ≤ 4,8%. Rozrzutu między sesjami nie znamy (pilotaż ma jedną sesję na konfigurację) — to właśnie mierzy kampania.
+- **Pilotaż** (okno 720 s, inny protokół) **nie wchodzi do danych ani do analizy** — faza `pilot`, `summarize.py` raportuje fazy osobno.
+- **Bez osobnego ponownego pilotażu E20** — reguła zatrzymania to pokrywa.
+- **Przed kampanią:** sesja eksperymentu wyjaśniającego `scripts/run-session.sh iaas-premium-ssd-readcache 5` (faza `explanatory`, już z oknem 600 s).
 
 ## Eksperyment wyjaśniający: cache odczytu na IaaS (zaprojektowany 2026-10-07, przed pomiarem)
 
@@ -181,7 +215,7 @@ Konfiguracja PostgreSQL jest wyrównana (15/15 parametrów), klasa maszyny ta sa
 
 **Projekt:**
 - Środowisko `environments/iaas-premium-ssd-readcache`: Premium P20 512 GB, `data_disk_caching = "ReadOnly"`, wszystko inne identyczne z `iaas-premium-ssd` (ta sama konfiguracja PostgreSQL, VM, sieć, klient). `data_disk_caching` przechodzi przez `iaas-environment` (domyślnie `"None"`, walidacja: `None` | `ReadOnly`). Osobny klucz stanu: `iaas-premium-ssd-readcache.tfstate`.
-- **Poza główną macierzą:** jedna sesja, 5 przebiegów: `scripts/run-session.sh iaas-premium-ssd-readcache 5`. Faza `explanatory` jest dla tego środowiska domyślna i wymuszona.
+- **Poza główną macierzą:** jedna sesja, 5 przebiegów, okno 600 s jak w kampanii: `scripts/run-session.sh iaas-premium-ssd-readcache 5` — przed startem kampanii. Faza `explanatory` jest dla tego środowiska domyślna i wymuszona.
 - `Standard_B2s_v2` ma cache hosta (`az vm list-skus`): z cache 9000 IOPS / 125 MB/s wobec 3750 IOPS / 85 MB/s bez cache. **Rozmiaru cache Azure nie publikuje** (brak `CachedDiskBytes`), więc przy bazie 14,6 GiB trafienia w cache są niewiadomą — to część tego, co eksperyment mierzy.
 - Burn-in: adaptacyjny dla IaaS (sekcja "Bursting") — przy wyższym CPU kredyty CPU `B2s_v2` mogą zacząć schodzić, wtedy burn-in trwa do ich wyczerpania.
 - Kryterium stanu ustalonego według tej samej zasady (wyczerpane wszystkie pule, które pod obciążeniem się wyczerpują): dla każdej puli — wyczerpana albo nie wyczerpuje się w oknie pomiaru (tabela w "Kryterium ważności przebiegu"). Do tego kolumny `*_first` / `*_last` (pierwszy i ostatni odczyt puli w oknie), bo min/max nie mówią, w którą stronę pula się ruszała.
@@ -286,7 +320,7 @@ Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla sub
 ## Parametry pgbench (ustalone)
 - Scale factor: **1000** (**15,69 GB = 14,6 GiB** bazy — `pg_database_size` po `init-db.sh`; wcześniejsze "13 GB" było odczytem w trakcie budowy klucza głównego; w pracy jednostki binarne (GiB); celowo > 8 GiB RAM serwera, żeby wymusić realne I/O na dysk zamiast operowania z cache). `init-db.sh` zapisuje rozmiar i czas inicjalizacji w `results/<env>/init-*.env`.
 - Warm-up: minimum 2 min, nieliczony do wyników; od 2026-10-08 adaptacyjny — trwa, dopóki pule wyczerpane w burn-inie nie wrócą do wyczerpania (patrz "Bursting jako czynnik zakłócający")
-- Pomiar właściwy: 12 min → `pgbench -c 25 -j 2 -T 720 -P 60 -l`
+- Pomiar właściwy: 10 min (600 s = `checkpoint_timeout`, jeden cykl checkpointu — sekcja "Okno pomiaru") → `pgbench -c 25 -j 2 -T 600 -P 60 -l`; pilotaż mierzył 12 min (`-T 720`)
 - Klienci: `-c 25 -j 2`
 - Reset stanu: `TRUNCATE pgbench_history` + `VACUUM ANALYZE` po każdym powtórzeniu w obrębie tej samej konfiguracji; pełna reinicjalizacja (`pgbench -i -s 1000`) tylko przy zmianie konfiguracji
 - Burn-in: ciągły pgbench raz po inicjalizacji, do wyczerpania pul kredytów, minimum 60 min (B1ms adaptacyjnie, limit 4 h), nieliczony, bez przerwy przed pierwszym pomiarem (patrz "Bursting jako czynnik zakłócający")
@@ -294,10 +328,10 @@ Wniosek metodologiczny do rozdziału 3: dostępność zasobów w chmurze dla sub
 
 ## Plan statystyczny
 1. Pilotaż: 5 przebiegów na każdą z 4 konfiguracji → policz odchylenie standardowe TPS/latencji. **Przebiegi pilotażu nie trafiają do końcowego zbioru**: każdy przebieg ma w `meta.env` i w `summary.csv` kolumnę `phase` (`pilot` / `main` / `explanatory` — ta ostatnia wyłącznie dla eksperymentu wyjaśniającego i dla niego obowiązkowa; skrypty pilnują tego w obie strony). Domyślnie `pilot` — fazę `main` trzeba podać jawnie (`--phase main`), więc pomyłka może najwyżej wykluczyć przebieg, nigdy wmieszać pilotaż do danych.
-2. Na tej podstawie wylicz wymaganą liczbę powtórzeń N dla sensownego przedziału ufności (spodziewane 15-25)
-3. Randomizacja kolejności konfiguracji i pory dnia pomiarów (rozłożone na różne dni — argument na zmienność chmury w czasie)
+2. Pilotaż zakończony. Jednostką statystyczną jest **sesja**, nie przebieg (sekcja "Jednostka statystyczna: sesja"); liczba sesji: 4 na konfigurację, z regułą zatrzymania do 6 (sekcja "Plan kampanii").
+3. Randomizacja kolejności konfiguracji (`campaign/round-order.csv`, kwadrat łaciński) i rotacja pory dnia — rundy rozłożone na różne dni, argument na zmienność chmury w czasie
 4. Raportowanie: średnia ± CI, nigdy pojedyncze liczby.
-5. **Format każdego podsumowania (od 2026-10-08):** średnia, odchylenie standardowe (SD) i 95% przedział ufności średniej z rozkładu t-Studenta (df = n − 1), **każde podpisane** — „± SD” i „± 95% CI” to różne wielkości (przy n = 3: 957,8 TPS, SD 9,1, 95% CI ±22,7). Liczy to `scripts/summarize.py <env>` (kwantyl t wyliczany dokładnie, bez tablic), osobno dla przebiegów w stanie ustalonym i dla wszystkich.
+5. **Format każdego podsumowania (od 2026-10-08):** średnia, odchylenie standardowe (SD) i 95% przedział ufności średniej z rozkładu t-Studenta, **każde podpisane** — „± SD” i „± 95% CI” to różne wielkości (przy n = 3: 957,8 TPS, SD 9,1, 95% CI ±22,7). Od 2026-10-09 liczone po średnich sesji (df = k − 1). Liczy to `scripts/summarize.py <env>` (kwantyl t wyliczany dokładnie, bez tablic), osobno dla przebiegów w stanie ustalonym i dla wszystkich.
 
 ## Budżet
 Realny koszt obliczeniowy przy efemerycznych środowiskach (stawianych na czas testu i niszczonych zaraz po) to raczej kilkanaście-kilkadziesiąt dolarów, nie $100. Główne ryzyko: zapomnienie o `terraform destroy` — automatyzacja niszczenia zasobów jest priorytetem.
@@ -331,16 +365,19 @@ azure-postgres-iaas-paas-benchmark/
 ├── scripts/
 │   ├── lib/common.sh              # wspólna konfiguracja (parametry pgbench, SSH, .pgpass) + helpery
 │   ├── init-db.sh <env>           # pgbench -i -s 1000 (raz na środowisko, przed pierwszym run-benchmark.sh)
-│   ├── run-benchmark.sh <env>     # warm-up + pomiar 12min + snapshoty pg_stat_* + TRUNCATE/VACUUM ANALYZE;
-│   │                              # --burn-in: najpierw ciągłe 60 min; ściąga wyniki do results/
+│   ├── run-benchmark.sh <env>     # warm-up + pomiar 10 min + snapshoty pg_stat_* + TRUNCATE/VACUUM ANALYZE;
+│   │                              # --burn-in: najpierw burn-in (≥ 60 min, adaptacyjny); ściąga wyniki do results/
 │   ├── collect-results.sh <env>   # agreguje results/<env>/<run>/ → results/<env>/summary.csv
 │   ├── teardown.sh <env>          # collect → check metryk → gzip → upload → terraform destroy
 │   ├── run-session.sh <env> <N>   # cała sesja: IP → apply → init-db → burn-in → N przebiegów → teardown (pułapka: --force)
-│   ├── summarize.py <env>         # n, średnia, SD, 95% CI (t) — przebiegi w stanie ustalonym i wszystkie
+│   ├── summarize.py <env>         # średnie sesji → k, średnia, SD, 95% CI (t, df = k − 1) — stan ustalony i wszystkie
+│   ├── draw-campaign.py           # losowanie kolejności rund kampanii → campaign/round-order.csv
 │   └── lib/run_stats.py           # percentyle latencji, TPS 3 min, delty pg_stat_* (dla collect-results)
+├── campaign/round-order.csv      # wylosowana kolejność rund kampanii (ziarno, data, metoda)
+├── tests/dry-run/                # run.sh + fałszywe ssh/terraform/az/psql/pgbench: całe sesje bez Azure
 ├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
 │   └── _archive/                  # pilotaż 128 GB i sanity checki — poza zbiorem danych
-└── .github/workflows/             # opcjonalnie: terraform fmt -check + validate jako CI gate
+└── .github/workflows/             # CI: terraform fmt -check, validate, bash -n, py_compile, dry run
 ```
 
 ### Jak działają `scripts/*.sh`
@@ -350,7 +387,7 @@ azure-postgres-iaas-paas-benchmark/
 - **W praktyce całą sesję robi `run-session.sh <env> <N> [--phase pilot|main]`:** aktualizacja `admin_source_ip` w `terraform.tfvars` środowiska → `terraform init` + `apply` → czekanie na cloud-init (klient; dla IaaS też VM bazy) → `init-db.sh` → `run-benchmark.sh --burn-in` → N−1 kolejnych przebiegów jeden po drugim → `teardown.sh`. **Obowiązkowa pułapka:** przy błędzie, Ctrl+C (SIGINT), SIGTERM i SIGHUP (zamknięcie terminala) wywołuje `teardown.sh --force` — celem jest, żeby nic nie zostało włączone; drugi Ctrl+C nie przerwie tego teardownu. Log całej sesji: `results/<env>/session-<czas>.log` (na końcu wgrywany też do kontenera). Długie sesje i tak uruchamiać w `tmux`/`screen`.
 - Ctrl+C lub błąd w `run-benchmark.sh` zatrzymuje też pgbench na kliencie (`pkill -x pgbench` przez SSH) — przerwany lokalny `ssh` sam go nie zatrzymuje.
 - `teardown.sh` kończy sesję w jedynej kolejności, która nic nie gubi: odczekuje lag ingestii → `collect-results.sh` → sprawdza, że ostatni przebieg ma wypełnione wymagane kolumny metryk (inaczej przerywa **przed** `destroy`; `--force` świadomie to pomija) → gzip surowych logów `-l` → upload `results/<env>/` do kontenera `results` w `sttfstatepgbench01` → `terraform destroy -auto-approve` → sprawdzenie, że resource group zniknęła. Nieudany upload nie blokuje `destroy` (dane zostają lokalnie; zostawienie środowiska jest droższą porażką).
-- `summary.csv` (jeden wiersz na przebieg pomiarowy): `steady_state` (patrz "Kryterium ważności przebiegu"), TPS, średnia latencja, p50/p95/p99/p99.9 latencji i liczba nieudanych transakcji (z logów `-l`), TPS z pierwszych i ostatnich 3 min (dryf, np. koniec kredytów w trakcie pomiaru), cache hit ratio, odczyty/zapisy i ich czasy z `pg_stat_io`, checkpointy timed/req, `measure_start`, `server_version`, `idle_gap_s` oraz metryki Azure Monitor (IOPS odczyt/zapis, queue depth, % zużycia IOPS dysku, CPU, pamięć, kredyty). Nazwy kolumn wspólne dla IaaS i PaaS tam, gdzie wielkość jest ta sama.
+- `summary.csv` (jeden wiersz na przebieg pomiarowy): `phase`, `session_id`, `steady_state` (patrz "Kryterium ważności przebiegu"), `checkpoint_aligned`, `warmup_s`, TPS, średnia latencja, p50/p95/p99/p99.9 latencji i liczba nieudanych transakcji (z logów `-l`), TPS z pierwszych i ostatnich 3 min (dryf, np. koniec kredytów w trakcie pomiaru), cache hit ratio, odczyty/zapisy i ich czasy z `pg_stat_io`, checkpointy timed/req, `measure_start`, `server_version`, `idle_gap_s` oraz metryki Azure Monitor (IOPS odczyt/zapis, queue depth, % zużycia IOPS dysku, CPU, pamięć, kredyty). Nazwy kolumn wspólne dla IaaS i PaaS tam, gdzie wielkość jest ta sama.
 - Login/hasło do bazy dla PaaS pobierane z outputów Terraforma (`db_admin_login`, `db_name`, `db_fqdn`) — brak zahardkodowanych wartości mogących się rozjechać z `terraform.tfvars`. Dla IaaS `postgres`/`pgbench_db` są zahardkodowane w skrypcie zgodnie z `modules/iaas-vm/cloud-init.tpl` (tam też nie są parametryzowane).
 
 Każda konfiguracja w `environments/` ma **własny, izolowany stan Terraforma** (backend `azurerm`, NIE Git — patrz niżej) — pozwala to na niezależne `apply`/`destroy` pojedynczego wariantu bez ryzyka dla pozostałych.
@@ -379,8 +416,8 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - **Faza 0 — ZAMKNIĘTA**: projekt eksperymentu
 - **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
-- **Faza 3 — POMIARY ZAKOŃCZONE (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi) → wyliczenie N (tabela w "Pilotaż — podsumowanie"; czeka na decyzję o docelowej precyzji i `CHECKPOINT`). Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
-- Faza 4: właściwe pomiary (N×4, randomizacja)
+- **Faza 3 — ZAMKNIĘTA (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi); wnioski 2026-10-09: okno pomiaru 600 s, sesja jako jednostka statystyczna, plan kampanii z regułą zatrzymania. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
+- **Faza 4 — następna:** sesja eksperymentu wyjaśniającego, potem kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
 - Faza 5: analiza wyników + rozdział 5
 - Faza 6: rozdział 6 (wnioski)
 - Faza 7: redakcja, poprawki promotora, złożenie w APD

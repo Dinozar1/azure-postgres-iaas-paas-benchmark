@@ -3,13 +3,23 @@
 
 Usage: summarize.py <environment-or-summary.csv> [...]
 
-For every phase, prints n, mean, standard deviation (SD) and the half-width of
-the 95% confidence interval of the mean from Student's t distribution, for
-TPS, mean latency and p99 latency — twice: over the steady-state runs only
-(steady_state = true, or n/a where a configuration has no criterion), and over
-every run, the sensitivity check the analysis reports alongside. Every number
-is labelled, so a spread is never mistaken for an interval (CLAUDE.md, "Plan
-statystyczny").
+The statistical unit is the SESSION (one deployment of the environment), not
+the run: runs of one session share a host and its neighbours, so they are not
+independent, and treating them as such would understate the interval (the PaaS
+GP pilot session averaged 1383.7 TPS against 1346 in the sanity check a day
+earlier, over five times the within-session SD — a hint rather than proof, as
+the sanity check ran a shorter burn-in). So, per phase:
+
+  1. mean of the runs within each session,
+  2. mean and standard deviation (SD) of those session means,
+  3. 95% confidence interval of the mean from Student's t over sessions
+     (df = k - 1), also as a percentage of the mean against the campaign's
+     +-5% target (CLAUDE.md, "Plan kampanii").
+
+Done twice: over steady-state runs only (steady_state = true, or n/a where a
+configuration has no criterion) and over every run, the sensitivity check
+reported alongside. Within-session spread is printed as description only.
+Every number is labelled, so a spread is never mistaken for an interval.
 """
 import csv
 import math
@@ -18,6 +28,7 @@ import statistics
 import sys
 
 METRICS = [("tps", "TPS"), ("latency_avg_ms", "latency [ms]"), ("lat_p99_ms", "p99 [ms]")]
+TARGET_PCT = 5.0
 
 
 def _betacf(a, b, x):
@@ -76,17 +87,50 @@ def t_quantile(q, df):
     return (lo + hi) / 2.0
 
 
-def describe(values):
+def interval(values):
+    """n, mean, SD and the 95% CI half-width (t, df = n - 1) of values."""
     n = len(values)
-    if n == 0:
-        return "n=0"
     mean = statistics.fmean(values)
-    if n == 1:
-        return f"n=1  mean={mean:.2f}  SD=n/a  95% CI=n/a"
+    if n < 2:
+        return n, mean, None, None
     sd = statistics.stdev(values)
-    half = t_quantile(0.975, n - 1) * sd / math.sqrt(n)
-    return (f"n={n}  mean={mean:.2f}  SD={sd:.2f}  "
-            f"95% CI (t, df={n - 1})=±{half:.2f}  [{mean - half:.2f}, {mean + half:.2f}]")
+    return n, mean, sd, t_quantile(0.975, n - 1) * sd / math.sqrt(n)
+
+
+def report(rows, indent):
+    sessions = {}
+    for r in rows:
+        sessions.setdefault(r.get("session_id") or "?", []).append(r)
+    for sid in sorted(sessions):
+        runs = sessions[sid]
+        means = []
+        for col, name in METRICS:
+            vals = [float(r[col]) for r in runs if r.get(col)]
+            means.append(f"{name}={statistics.fmean(vals):.2f}" if vals else f"{name}=-")
+        print(f"{indent}session {sid}: n={len(runs)} runs, means " + "  ".join(means))
+    for col, name in METRICS:
+        session_means = []
+        within = []
+        for runs in sessions.values():
+            vals = [float(r[col]) for r in runs if r.get(col)]
+            if vals:
+                session_means.append(statistics.fmean(vals))
+            if len(vals) >= 2:
+                within.append(statistics.stdev(vals))
+        if not session_means:
+            continue
+        k, mean, sd, half = interval(session_means)
+        line = f"{indent}{name:14} across sessions: k={k}  mean={mean:.2f}"
+        if half is None:
+            line += "  SD=n/a  95% CI=n/a (needs at least 2 sessions)"
+        else:
+            pct = 100 * half / mean if mean else float("nan")
+            status = "within" if pct <= TARGET_PCT else "WIDER than"
+            line += (f"  SD={sd:.2f}  95% CI (t, df={k - 1})=±{half:.2f}"
+                     f"  [{mean - half:.2f}, {mean + half:.2f}]  = ±{pct:.1f}% of mean, {status} ±{TARGET_PCT:.0f}%")
+        if within:
+            line += f"  | within-session SD (mean over sessions, descriptive)={statistics.fmean(within):.2f}"
+        print(line)
 
 
 def load(arg):
@@ -108,9 +152,7 @@ def main(args):
             steady = [r for r in in_phase if r.get("steady_state") in ("true", "n/a")]
             for label, subset in (("steady-state runs", steady), ("all runs (sensitivity)", in_phase)):
                 print(f"  phase={phase or '-'}  {label}:")
-                for col, name in METRICS:
-                    vals = [float(r[col]) for r in subset if r.get(col)]
-                    print(f"    {name:14} {describe(vals)}")
+                report(subset, "    ")
     return 0
 
 

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Like the real tool: with --wait, progress dots precede the status on the same line.
+if [[ " $* " == *" --wait "* ]]; then printf '.....'; fi
+echo "status: done"
+[[ " $* " == *" --long "* ]] && echo "extended_status: done"
+exit 0

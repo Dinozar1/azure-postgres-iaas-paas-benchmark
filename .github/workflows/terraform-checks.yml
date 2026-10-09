@@ -1,6 +1,7 @@
 name: terraform-checks
 
-# Lightweight quality gate: formatting, validation, shell syntax.
+# Lightweight quality gate: formatting, validation, shell and Python syntax,
+# and a dry run of the measurement scripts against fake cloud tools.
 #
 # Deliberately credential-free: `terraform init -backend=false` skips the
 # azurerm backend, so no Azure service principal is needed and nothing is ever
@@ -10,7 +11,9 @@ name: terraform-checks
 # in Azure, reached over SSH from a single admin IP allowed by the NSG, while
 # GitHub-hosted runners use large rotating address ranges. Running the
 # measurements from CI would mean opening SSH far wider without making any
-# measurement more rigorous — orchestration stays local (see scripts/).
+# measurement more rigorous — orchestration stays local (see scripts/). The
+# dry run (tests/dry-run/run.sh) exercises that orchestration end to end with
+# fake ssh/terraform/az/psql/pgbench, so it needs no credentials either.
 
 on:
   push:
@@ -45,10 +48,13 @@ jobs:
 
       - name: shell syntax
         run: |
-          for f in scripts/lib/common.sh scripts/*.sh; do
+          for f in scripts/lib/common.sh scripts/*.sh tests/dry-run/run.sh; do
             echo "-- $f"
             bash -n "$f"
           done
 
       - name: python syntax
         run: python3 -m py_compile scripts/*.py scripts/lib/*.py
+
+      - name: dry run of the measurement scripts
+        run: tests/dry-run/run.sh

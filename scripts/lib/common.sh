@@ -11,7 +11,16 @@ PGBENCH_SCALE=1000
 WARMUP_SECONDS=120          # minimum
 WARMUP_MAX_SECONDS=2400     # safety limit for an adaptive warm-up (40 min)
 WARMUP_CHECK_SECONDS=60     # adaptive warm-up: how often the pools are read
-MEASURE_SECONDS=720
+# Measured window: one full checkpoint cycle. checkpoint_timeout is 600 s on
+# both arms (Azure's setting, carried over to IaaS), so a 600 s window holds
+# exactly one timed checkpoint whatever phase it starts in. init-db.sh checks
+# the server's checkpoint_timeout equals this, and summary.csv flags each run
+# (checkpoint_aligned: one timed checkpoint, none requested). The pilot used
+# 720 s, which held one or two checkpoints depending on phase — on the E20's
+# ~500 IOPS that alone moved TPS by ~15%. No CHECKPOINT is forced before the
+# window: that would start every run right after a full flush of dirty pages,
+# a phase continuous operation never has.
+MEASURE_SECONDS=600
 PGBENCH_CLIENTS=25
 PGBENCH_JOBS=2
 PROGRESS_INTERVAL=60
@@ -132,6 +141,27 @@ env_get() {
   local file="$1" key="$2"
   [ -f "$file" ] || return 0
   grep -E "^${key}=" "$file" | tail -n1 | cut -d= -f2- || true
+}
+
+# session_id_for <results_env_dir> <iso_time>
+#
+# The session a run belongs to: the incarnation of the environment, named by
+# the timestamp of the init-db.sh that loaded its data — the newest init-*.env
+# that ended at or before the given time. Runs of one session share a
+# deployment (host, neighbours) and are not independent, so the session, not
+# the run, is the statistical unit (CLAUDE.md, "Jednostka statystyczna: sesja").
+session_id_for() {
+  local dir="$1" t="$2" f end best="" best_end=""
+  for f in "$dir"/init-*.env; do
+    [ -f "$f" ] || continue
+    end="$(env_get "$f" INIT_END)"
+    [ -n "$end" ] || continue
+    if [[ ! "$end" > "$t" ]] && [[ -z "$best_end" || "$end" > "$best_end" ]]; then
+      best="$f"
+      best_end="$end"
+    fi
+  done
+  if [ -n "$best" ]; then basename "$best" .env | sed 's/^init-//'; fi
 }
 
 # latest_load_end <results_env_dir>: when the most recent load on this
@@ -651,7 +681,7 @@ for col, name, how in spec:
 # per-minute series to raw_json_out and prints them reduced (reduce_metrics).
 # Columns whose metric the resource does not publish, or which returned no
 # data points, are printed empty. Never fails the caller: a missing metric
-# must not cost a completed 12-minute measurement. raw_json_out is written
+# must not cost a completed measurement. raw_json_out is written
 # only from a successful query, so a failed one never overwrites saved data.
 fetch_metrics() {
   local resource_id="$1" start_iso="$2" end_iso="$3" raw_out="$4"

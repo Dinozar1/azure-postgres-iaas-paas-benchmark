@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake sleep: real, but capped at FAKE_SLEEP_CAP seconds (default 2), so the
+# polling loops keep their order of events without the real waits.
+echo "[sleep $1]" >>"$DRYRUN/calls.log"
+exec /bin/sleep "$(awk -v s="$1" -v c="${FAKE_SLEEP_CAP:-2}" 'BEGIN { print (s + 0 < c ? s + 0 : c) }')"

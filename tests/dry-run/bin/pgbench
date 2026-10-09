@@ -1,0 +1,40 @@
+#!/usr/bin/python3
+# Fake pgbench (direct python shebang: the process is named "pgbench", so
+# pkill -x pgbench finds it). An unlogged load (burn-in, warm-up) runs -T real
+# seconds, so the watchers have something to stop; a measured (-l) run returns
+# at once with -T seconds of synthetic per-transaction log. FAKE_PGBENCH_DELAY
+# sleeps before a measured run, FAKE_PGBENCH_FAIL_T fails the run with that -T.
+import os, sys, time, random
+a = sys.argv[1:]
+with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[pgbench] " + " ".join(a) + "\n")
+if "-i" in a:
+    print("done in 1.23 s (drop tables 0.00 s, create tables 0.01 s, client-side generate 1.00 s, vacuum 0.10 s, primary keys 0.12 s).", file=sys.stderr); sys.exit(0)
+T = int(a[a.index("-T") + 1]); log = "-l" in a; P = "-P" in a
+if os.environ.get("FAKE_PGBENCH_FAIL_T") == str(T):
+    print("pgbench: error: connection lost (fake)", file=sys.stderr); sys.exit(2)
+if log and os.environ.get("FAKE_PGBENCH_DELAY"):
+    time.sleep(float(os.environ["FAKE_PGBENCH_DELAY"]))
+if not log:
+    sys.stdout.write("progress: 1.0 s, 100.0 tps, lat 10.000 ms stddev 1.000, 0 failed\n"); sys.stdout.flush(); time.sleep(T)
+print("pgbench (16.4)\nstarting vacuum...end.")
+if P:
+    for t in range(60, T + 1, 60): print(f"progress: {t}.0 s, {200+random.random()*20:.1f} tps, lat 120.000 ms stddev 80.000, 0 failed")
+n = failed = 0
+if log:
+    start = int(time.time()) - T
+    for suffix in ("", ".1"):
+        with open(f"pgbench_log.{os.getpid()}{suffix}", "w") as f:
+            for i in range(T * 20):
+                fin = start + i / 20 + 0.5; lat = int(random.lognormvariate(11.5, 0.4))
+                if i % 5000 == 4999: f.write(f"{i%12} {i} failed 0 {int(fin)} {int((fin%1)*1e6)}\n"); failed += 1
+                else: f.write(f"{i%12} {i} {lat} 0 {int(fin)} {int((fin%1)*1e6)}\n"); n += 1
+else:
+    n = T * 200
+print(f"""transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1000
+duration: {T} s
+number of transactions actually processed: {n}
+number of failed transactions: {failed} (0.000%)
+latency average = 120.977 ms
+latency stddev = 94.302 ms
+tps = {n/T:.6f} (without initial connection time)""")

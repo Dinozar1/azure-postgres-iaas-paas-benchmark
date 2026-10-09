@@ -37,6 +37,8 @@ bootstrap/      one-off: storage account for remote state + "results" archive co
 modules/        network, linux-vm, iaas-vm, client-vm, paas-postgres, *-environment
 environments/   one thin root module per configuration, each with its own state
 scripts/        benchmark orchestration, run locally over SSH to the client VM
+campaign/       the drawn order of the measurement campaign's rounds
+tests/dry-run/  whole sessions against fake cloud tools, no Azure involved
 results/        raw output per run (git-ignored except results/<env>/summary.csv)
 ```
 
@@ -59,6 +61,13 @@ environment down. On any error, Ctrl+C, SIGTERM or SIGHUP a trap runs
 `teardown.sh --force`, so nothing is left running. Runs are marked `pilot`
 unless `--phase main` is given; only `main` runs make the final dataset.
 
+Each measured run is a warm-up (not counted) followed by a 10-minute
+`pgbench` window: 600 s equals `checkpoint_timeout`, so every window holds
+exactly one checkpoint cycle whatever phase it starts in. `init-db.sh` checks
+`checkpoint_timeout` before loading and stops the session if it differs, and
+the `checkpoint_aligned` column of `summary.csv` confirms one timed and no
+requested checkpoint per window.
+
 The same steps by hand:
 
 ```sh
@@ -74,6 +83,29 @@ scripts/teardown.sh <env>                # collect metrics, archive results, ter
 readable only while the resources exist, so it collects them before
 destroying anything, and refuses to destroy while required metric columns of
 the latest run are still empty.
+
+## Campaign and analysis
+
+The statistical unit is the session (one deployment of an environment), not
+the run: runs within a session share the same hardware. The order of the
+sessions is drawn in advance and recorded in the repository:
+
+```sh
+scripts/draw-campaign.py --seed 20261009 --rounds 4   # -> campaign/round-order.csv
+scripts/summarize.py <env>                            # per-session means, then mean, SD
+                                                      # and a 95% t interval across sessions
+```
+
+With as many rounds as configurations the order is a random Latin square:
+every configuration takes every position in a round once. Further rounds can
+be appended (`--first-round`, `--envs`); existing rounds are never redrawn.
+
+## Dry run
+
+`tests/dry-run/run.sh` runs whole sessions — burn-in, adaptive warm-up,
+measured runs, collection, teardown, the error trap — against fake `ssh`,
+`terraform`, `az`, `psql` and `pgbench`, with the timing constants shrunk to
+seconds. Nothing reaches Azure; CI runs it on every push.
 
 ## Methodology
 

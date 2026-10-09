@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs one benchmark repetition against an already-initialized database
 # (see init-db.sh): warm-up (uncounted) + measured run
-# (pgbench -c 25 -j 2 -T 720 -P 60 -l, per CLAUDE.md/promotor spec) +
+# (pgbench -c 25 -j 2 -T 600 -P 60 -l: one full checkpoint cycle, MEASURE_SECONDS) +
 # TRUNCATE pgbench_history and VACUUM ANALYZE to reset state before the next
 # repetition of this config.
 #
@@ -417,6 +417,7 @@ run_on_client() {
   # is how long this run's warm-up actually lasted.
   {
     echo "ENV_NAME=$ENV_NAME"
+    echo "SESSION_ID=$(session_id_for "$RESULTS_ROOT/$ENV_NAME" "$load_start")"
     echo "RUN_ID=$run_id"
     echo "PHASE=$PHASE"
     echo "BURN_IN=$burn_in"

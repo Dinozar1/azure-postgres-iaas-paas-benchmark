@@ -50,3 +50,6 @@ terraform.rc
 results/**
 !results/*/
 !results/*/summary.csv
+
+# Python bytecode (py_compile in CI and local checks)
+__pycache__/
