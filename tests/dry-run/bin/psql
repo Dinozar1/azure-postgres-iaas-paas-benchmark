@@ -28,6 +28,7 @@ if not cmds:
         if "pg_stat_io" in line: out.write("snapshot_at," + "\n2026-10-07 10:00:00+00,".join(io_rows(k)) + "\n")
         elif "pg_stat_database" in line: out.write(f"snapshot_at,datid,datname,blks_read,blks_hit\n2026-10-07 10:00:00+00,16384,pgbench_db,{k*1000},{k*99000}\n")
         elif "pg_stat_bgwriter" in line: out.write(f"snapshot_at,checkpoints_timed,checkpoints_req\n2026-10-07 10:00:00+00,{k},{req}\n")
+        elif "pg_total_relation_size" in line: out.write(f"snapshot_at,accounts_bytes\n2026-10-07 10:00:00+00,{13000000000 + k * 1000000}\n")
     sys.exit(0)
 for c in cmds:
     if "checkpoint_timeout" in c: print(os.environ.get("FAKE_CHECKPOINT_TIMEOUT", "600"))

@@ -359,8 +359,12 @@ PAAS_BURN_IN_METRICS=(
 # thresholds may be revised only on the evidence of a burn-in's credit curve,
 # never on TPS results.
 STEADY_DISK_BURST_IO_PCT_MIN=99 # disk pool spent: disk_burst_io_pct_min >= this
-STEADY_CPU_CREDITS_MIN=0        # IaaS: CPU not throttled, cpu_credits_remaining_min > this
-STEADY_CPU_CREDITS_SPENT_MAX=1  # CPU credits spent: cpu_credits_remaining_max <= this
+# CPU credits count as spent at or below the floor the published metric stays
+# on once the CPU is throttled — not 0, which neither metric reaches. One
+# definition both ways: spent <= the floor (burn-in, warm-up, criteria that
+# need spent credits), not throttled > the floor (main IaaS criterion).
+STEADY_B1MS_CPU_CREDITS_SPENT_MAX=1 # Flexible Server B1ms: stays at 1.0 (pilot, 2026-10-09)
+STEADY_VM_CPU_CREDITS_SPENT_MAX=2   # VM B2s_v2: hovers at 1.2-2.0 (read-cache burn-in, 2026-10-10)
 STEADY_TREND_USED_PCT_TOL=1     # disk pool not draining: used share grew <= this over the window
 STEADY_TREND_CREDITS_TOL=0.5    # CPU pool not draining: credits fell <= this over the window
 
@@ -373,8 +377,8 @@ STEADY_TREND_CREDITS_TOL=0.5    # CPU pool not draining: credits fell <= this ov
 # measured state must be one the configuration holds indefinitely under this
 # load — every pool that drains under it is spent. On the main IaaS
 # configurations the CPU runs below its baseline once the disk pool is spent,
-# so credits > 0 lasts forever there; on B1ms the CPU runs above its baseline,
-# so only spent credits are sustainable. The explanatory read-cache
+# so unspent credits (above the floor) last forever there; on B1ms the CPU runs
+# above its baseline, so only spent credits are sustainable. The explanatory read-cache
 # environment, where it is not known in advance which pools drain, applies the
 # principle directly: each pool is either spent or not draining during the run.
 steady_state() {
@@ -399,7 +403,7 @@ steady_state() {
     awk -v bmin="$burst_min" -v bfirst="$burst_first" -v blast="$burst_last" \
       -v cmax="$credits_max" -v cfirst="$credits_first" -v clast="$credits_last" \
       -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v bt_tol="$STEADY_TREND_USED_PCT_TOL" \
-      -v ct="$STEADY_CPU_CREDITS_SPENT_MAX" -v ct_tol="$STEADY_TREND_CREDITS_TOL" \
+      -v ct="$STEADY_VM_CPU_CREDITS_SPENT_MAX" -v ct_tol="$STEADY_TREND_CREDITS_TOL" \
       'BEGIN {
         disk_ok = (bmin >= bt) || (blast - bfirst <= bt_tol)
         cpu_ok = (cmax <= ct) || (cfirst - clast <= ct_tol)
@@ -409,12 +413,12 @@ steady_state() {
   iaas-*)
     [ -n "$burst_min" ] && [ -n "$credits_min" ] || return 0
     awk -v b="$burst_min" -v c="$credits_min" \
-      -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_CPU_CREDITS_MIN" \
+      -v bt="$STEADY_DISK_BURST_IO_PCT_MIN" -v ct="$STEADY_VM_CPU_CREDITS_SPENT_MAX" \
       'BEGIN { print (b >= bt && c > ct) ? "true" : "false" }'
     ;;
   paas-burstable)
     [ -n "$credits_max" ] || return 0
-    awk -v c="$credits_max" -v ct="$STEADY_CPU_CREDITS_SPENT_MAX" \
+    awk -v c="$credits_max" -v ct="$STEADY_B1MS_CPU_CREDITS_SPENT_MAX" \
       'BEGIN { print (c <= ct) ? "true" : "false" }'
     ;;
   paas-general-purpose) echo "n/a" ;;
@@ -442,12 +446,15 @@ burn_in_pools() {
   paas-burstable)
     # Spent at <= 1, not 0: once the credits run out the published metric
     # stays at 1.0 while the CPU is throttled (pilot, 2026-10-09). The same
-    # threshold as the steady-state criterion (STEADY_CPU_CREDITS_SPENT_MAX).
-    echo "cpu_credits_remaining|balance|1|until_spent"
+    # threshold as the steady-state criterion.
+    echo "cpu_credits_remaining|balance|$STEADY_B1MS_CPU_CREDITS_SPENT_MAX|until_spent"
     ;;
   iaas-*)
-    echo "Data Disk Used Burst IO Credits Percentage|used|99|while_draining"
-    echo "CPU Credits Remaining|balance|0|while_draining"
+    # VM CPU credits: spent at <= 2, the floor they hovered on once spent in
+    # the read-cache burn-in (2026-10-10); at 0 the pool never read spent, so
+    # the warm-ups did not drain it again after each reset.
+    echo "Data Disk Used Burst IO Credits Percentage|used|$STEADY_DISK_BURST_IO_PCT_MIN|while_draining"
+    echo "CPU Credits Remaining|balance|$STEADY_VM_CPU_CREDITS_SPENT_MAX|while_draining"
     ;;
   esac
 }

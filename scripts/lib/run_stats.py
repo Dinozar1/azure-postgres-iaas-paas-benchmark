@@ -43,6 +43,8 @@ COLUMNS = [
     "checkpoints_timed",
     "checkpoints_req",
     "checkpoint_aligned",
+    "accounts_bytes_before",
+    "accounts_bytes_after",
 ]
 
 PERCENTILES = [("lat_p50_ms", 50), ("lat_p95_ms", 95), ("lat_p99_ms", 99), ("lat_p999_ms", 99.9)]
@@ -177,6 +179,13 @@ def pg_stat_deltas(run_dir):
         # checkpoint in it and no requested (WAL-volume) one.
         aligned = out["checkpoints_timed"] == "1" and out["checkpoints_req"] == "0"
         out["checkpoint_aligned"] = "true" if aligned else "false"
+
+    # pg_total_relation_size('pgbench_accounts') around the window: not a
+    # delta — the size itself shows growth from run to run in a session.
+    pair = snapshot_pair(run_dir, "pg_relation_size")
+    if pair:
+        out["accounts_bytes_before"] = f"{num(pair[0][0]['accounts_bytes']):.0f}"
+        out["accounts_bytes_after"] = f"{num(pair[1][0]['accounts_bytes']):.0f}"
 
     return out
 

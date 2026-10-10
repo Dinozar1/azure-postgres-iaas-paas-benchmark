@@ -1,0 +1,5 @@
+round,position,environment,session_id,started,finished,exit_status
+1,1,iaas-premium-ssd,20261010T005511Z,2026-10-10T00:52:07Z,2026-10-10T03:54:59Z,0
+1,2,iaas-standard-ssd,20261010T035836Z,2026-10-10T03:54:59Z,2026-10-10T08:19:03Z,0
+1,3,paas-burstable,20261010T082540Z,2026-10-10T08:19:03Z,2026-10-10T15:53:49Z,0
+1,4,paas-general-purpose,20261010T160017Z,2026-10-10T15:53:49Z,2026-10-10T18:49:58Z,0

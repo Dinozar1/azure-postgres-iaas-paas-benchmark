@@ -127,6 +127,9 @@ scenario_iaas() {
   check "no fake pgbench left running" no_fake_pgbench_left
   in_sandbox python3 "$SB/repo/scripts/summarize.py" iaas-premium-ssd >"$SB/summarize.out" 2>&1 || true
   check "summarize: k=2 sessions with a t interval (df=1)" grep -q 'k=2 .*95% CI (t, df=1)' "$SB/summarize.out"
+  check "pgbench_accounts size recorded before and after" none_empty "$csv" accounts_bytes_before
+  in_sandbox python3 "$SB/repo/scripts/summarize.py" --trend iaas-premium-ssd >"$SB/trend.out" 2>&1 || true
+  check "trend: a line per session" test "$(grep -c 'session .*TPS by run' "$SB/trend.out")" -eq 2
 }
 
 scenario_gp() {
@@ -160,12 +163,16 @@ scenario_readcache() {
   sandbox readcache iaas-premium-ssd-readcache
   if session iaas-premium-ssd-readcache 1 --phase main; then fail "--phase main rejected"; else pass "--phase main rejected"; fi
   check "nothing applied after the rejection" test "$(grep -c '^\[terraform\] apply' "$SB/calls.log")" -eq 0
-  export FAKE_LINEAR='{"Data Disk Used Burst IO Credits Percentage": [100, 100], "CPU Credits Remaining": [50, 50]}'
-  check "session exits 0" session iaas-premium-ssd-readcache 1
+  # As measured: the disk never bursts, the VM CPU credits sit on their floor.
+  export FAKE_LINEAR='{"Data Disk Used Burst IO Credits Percentage": [0, 0], "CPU Credits Remaining": [1.5, 1.5]}'
+  check "session exits 0" session iaas-premium-ssd-readcache 2
   unset FAKE_LINEAR
   local csv="$SB/repo/results/iaas-premium-ssd-readcache/summary.csv"
   check "phase explanatory by default" all_equal "$csv" phase explanatory
-  check "steady_state true (pools spent or level)" all_equal "$csv" steady_state true
+  check "CPU credits at 1.5 read spent in the burn-in (threshold 2)" \
+    grep -rqx 'BURN_IN_SPENT_POOLS=CPU Credits Remaining' "$SB/repo/results/iaas-premium-ssd-readcache" --include=meta.env
+  check "warm-ups wait for the CPU pool" grep -rq '^WARMUP_POOLS=CPU Credits Remaining=1.5 (spent)' "$SB/repo/results/iaas-premium-ssd-readcache" --include=meta.env
+  check "steady_state true (CPU spent, disk not draining)" all_equal "$csv" steady_state true
 }
 
 scenario_error() {

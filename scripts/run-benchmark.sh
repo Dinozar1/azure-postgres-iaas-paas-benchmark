@@ -158,6 +158,8 @@ sql --csv -c "SELECT * FROM pg_stat_ssl WHERE pid = pg_backend_pid()" >pg_stat_s
 
 # Cumulative statistics, server-wide (pg_stat_io, pg_stat_bgwriter) and for
 # the benchmark database; collect-results.sh works with the after-before delta.
+# Plus the size of pgbench_accounts with its indexes (read-only): whether the
+# table grows from run to run within a session (drift check, from round 2).
 snapshot() {
   sql --csv <<SQL
 \o pg_stat_io.$1.csv
@@ -166,6 +168,8 @@ SELECT now() AS snapshot_at, * FROM pg_stat_io;
 SELECT now() AS snapshot_at, * FROM pg_stat_database WHERE datname = current_database();
 \o pg_stat_bgwriter.$1.csv
 SELECT now() AS snapshot_at, * FROM pg_stat_bgwriter;
+\o pg_relation_size.$1.csv
+SELECT now() AS snapshot_at, pg_total_relation_size('pgbench_accounts') AS accounts_bytes;
 SQL
 }
 

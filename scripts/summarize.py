@@ -3,6 +3,7 @@
 
 Usage: summarize.py <environment-or-summary.csv> [...]
        summarize.py --alignment-check <phase> <environment-or-summary.csv> [...]
+       summarize.py --trend <environment-or-summary.csv> [...]
 
 The statistical unit is the SESSION (one deployment of the environment), not
 the run: runs of one session share a host and its neighbours, so they are not
@@ -30,6 +31,11 @@ agreed warning sign that the real checkpoint cycle is not 600 s: the campaign
 stops and the finding is reported. --alignment-check prints only that share
 for the given phase and exits 3 when it is over the limit (run-campaign.sh
 calls it after every session).
+
+--trend reports drift within sessions: for each session, the least-squares
+slope of TPS against the run's position in the session (1..n), with its 95%
+CI from t (df = n - 2), over the steady-state runs, each kept at its original
+position. A report only — no run is judged by it.
 """
 import csv
 import math
@@ -172,7 +178,62 @@ def alignment(phase, rows):
     return line, over
 
 
+def slope(points):
+    """Least-squares slope of y on x, and its 95% CI half-width (t, df = n - 2)."""
+    n = len(points)
+    if n < 3:
+        return None
+    mx = statistics.fmean(x for x, _ in points)
+    my = statistics.fmean(y for _, y in points)
+    sxx = sum((x - mx) ** 2 for x, _ in points)
+    if sxx == 0:
+        return None
+    b = sum((x - mx) * (y - my) for x, y in points) / sxx
+    sse = sum((y - my - b * (x - mx)) ** 2 for x, y in points)
+    return b, t_quantile(0.975, n - 2) * math.sqrt(sse / (n - 2) / sxx)
+
+
+def trend(path, rows):
+    print(f"== {path}")
+    for phase in sorted({r.get("phase", "") for r in rows}):
+        sessions = {}
+        for r in rows:
+            if r.get("phase", "") == phase:
+                sessions.setdefault(r.get("session_id") or "?", []).append(r)
+        pcts = []
+        for sid in sorted(sessions):
+            runs = sorted(sessions[sid], key=lambda r: r.get("measure_start", ""))
+            points = [(i, float(r["tps"])) for i, r in enumerate(runs, 1)
+                      if r.get("tps") and r.get("steady_state") in ("true", "n/a")]
+            shown = "  ".join(f"{i}:{y:.1f}" for i, y in points)
+            dropped = len(runs) - len(points)
+            line = f"  phase={phase or '-'}  session {sid}: TPS by run {shown}"
+            if dropped:
+                line += f"  ({dropped} run(s) outside the steady state left out)"
+            fit = slope(points)
+            if fit is None:
+                print(line + "  slope n/a (needs 3 runs)")
+                continue
+            b, half = fit
+            mean = statistics.fmean(y for _, y in points)
+            pct = 100 * b / mean
+            pcts.append(pct)
+            verdict = "excludes 0" if abs(b) > half else "includes 0"
+            print(f"{line}\n      slope {b:+.2f} TPS/run ({pct:+.2f}% of session mean per run),"
+                  f" 95% CI (t, df={len(points) - 2}) ±{half:.2f} [{b - half:+.2f}, {b + half:+.2f}], {verdict}")
+        if pcts:
+            print(f"  phase={phase or '-'}  slopes over {len(pcts)} session(s): "
+                  + ", ".join(f"{p:+.2f}%" for p in pcts) + " of session mean per run")
+
+
 def main(args):
+    if args[:1] == ["--trend"]:
+        if len(args) < 2:
+            print(__doc__, file=sys.stderr)
+            return 2
+        for arg in args[1:]:
+            trend(*load(arg))
+        return 0
     if args[:1] == ["--alignment-check"]:
         if len(args) < 3:
             print(__doc__, file=sys.stderr)

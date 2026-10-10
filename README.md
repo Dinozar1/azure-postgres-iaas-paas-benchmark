@@ -94,6 +94,7 @@ sessions is drawn in advance and recorded in the repository:
 scripts/draw-campaign.py --seed 20261009 --rounds 4   # -> campaign/round-order.csv
 scripts/summarize.py <env>                            # per-session means, then mean, SD
                                                       # and a 95% t interval across sessions
+scripts/summarize.py --trend <env>                    # TPS slope over the runs of each session
 ```
 
 With as many rounds as configurations the order is a random Latin square:
