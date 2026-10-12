@@ -10,14 +10,14 @@
 # run two dry runs at the same time.
 #
 # Usage: tests/dry-run/run.sh [scenario ...]    (default: all)
-# Scenarios: iaas gp burstable readcache error checkpoint campaign
+# Scenarios: iaas gp burstable readcache error checkpoint campaign rule_within rule_extend
 # The work directory is removed after a clean pass (unless DRYRUN_KEEP=1) and
 # kept after a failure.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-ALL_SCENARIOS="iaas gp burstable readcache error checkpoint campaign"
+ALL_SCENARIOS="iaas gp burstable readcache error checkpoint campaign rule_within rule_extend"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pgbench-dryrun.XXXXXX")"
 FAILURES=0
 
@@ -223,11 +223,12 @@ scenario_campaign() {
   if campaign; then fail "stop file present: refuses to start"; else pass "stop file present: refuses to start"; fi
   rm -f "$stop"
   export FAKE_PGBENCH_FAIL_T=600
-  if campaign; then fail "failed session stops the campaign"; else pass "failed session stops the campaign"; fi
+  if campaign; then fail "a session failing twice stops the campaign"; else pass "a session failing twice stops the campaign"; fi
   unset FAKE_PGBENCH_FAIL_T
-  check "ledger: failure recorded" test "$(col "$ledger" exit_status | tail -1)" != 0
+  check "ledger: both attempts recorded as failed" grep -Eq '^0 0 [1-9][0-9]* [1-9][0-9]* $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
+  check "the retry was announced" grep -q 'retrying once in' "$SB/session.out"
   check "relaunch retries the failed session" campaign --last-round 2
-  check "ledger: failure, then the retry succeeded" grep -Eq '^0 0 [1-9][0-9]* 0 $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
+  check "ledger: the relaunch succeeded" grep -Eq '^0 0 [1-9][0-9]* [1-9][0-9]* 0 $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
   export FAKE_CHECKPOINTS_REQ=1
   if campaign; then fail "over 20% checkpoint_aligned=false stops the campaign"; else pass "over 20% checkpoint_aligned=false stops the campaign"; fi
   unset FAKE_CHECKPOINTS_REQ
@@ -237,6 +238,44 @@ scenario_campaign() {
   check "summarize: share and warning printed" grep -q 'phase=main  checkpoint_aligned=false: 5 of 10 runs (50%)  WARNING' "$SB/summarize.out"
   check "summarize: sensitivity without misaligned runs" grep -q 'without checkpoint_aligned=false (sensitivity)' "$SB/summarize.out"
   unset FAKE_LINEAR FAKE_CREDITS
+  check "no fake pgbench left running" no_fake_pgbench_left
+}
+
+# four_rounds_of <env>: a campaign order of rounds 1-4 with that one configuration.
+four_rounds_of() {
+  mkdir -p "$SB/repo/campaign"
+  printf '%s\n' "# test order" "round,position,environment,seed" \
+    "1,1,$1,1" "2,1,$1,1" "3,1,$1,1" "4,1,$1,1" >"$SB/repo/campaign/round-order.csv"
+}
+
+scenario_rule_within() {
+  echo "== rule_within: identical sessions, the stopping rule adds nothing after round 4"
+  sandbox rule_within paas-general-purpose
+  four_rounds_of paas-general-purpose
+  local ledger="$SB/repo/campaign/sessions.csv"
+  check "campaign --stopping-rule exits 0" campaign --stopping-rule
+  check "ledger: four sessions, all exit 0" test "$(col "$ledger" exit_status | tr '\n' ' ')" = "0 0 0 0 "
+  check "the rule found the CI within +-5%" grep -q 'k=4 sessions.*within ±5%' "$SB/session.out"
+  check "no round 5 drawn" test "$(grep -c '^5,' "$SB/repo/campaign/round-order.csv")" -eq 0
+  check "no fake pgbench left running" no_fake_pgbench_left
+}
+
+scenario_rule_extend() {
+  echo "== rule_extend: scattered sessions get rounds 5 and 6; a failed attempt is retried and left out"
+  sandbox rule_extend paas-general-purpose
+  four_rounds_of paas-general-purpose
+  local ledger="$SB/repo/campaign/sessions.csv" order="$SB/repo/campaign/round-order.csv"
+  export FAKE_TPS_JITTER=0.5 FAKE_PGBENCH_FAIL_ONCE=2
+  check "campaign --stopping-rule exits 0" campaign --stopping-rule
+  unset FAKE_TPS_JITTER FAKE_PGBENCH_FAIL_ONCE
+  check "ledger: failed attempt, its retry, then rounds 2-6" \
+    grep -Eq '^[1-9][0-9]* 0 0 0 0 0 0 $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
+  check "round 5 drawn with seed 20261014" grep -q '^# rounds 5-5: seed=20261014' "$order"
+  check "round 6 drawn with seed 20261015" grep -q '^# rounds 6-6: seed=20261015' "$order"
+  check "stops at 6 sessions" grep -q 'round 7 would exceed 6 sessions' "$SB/session.out"
+  in_sandbox python3 "$SB/repo/scripts/summarize.py" paas-general-purpose >"$SB/summarize.out" 2>&1 || true
+  check "summarize leaves the failed attempt out" grep -q 'runs of failed campaign session(s) .* left out' "$SB/summarize.out"
+  check "summarize: k=6 in the main analysis" grep -q 'TPS .*across sessions: k=6 ' "$SB/summarize.out"
   check "no fake pgbench left running" no_fake_pgbench_left
 }
 

@@ -3,7 +3,9 @@
 # pkill -x pgbench finds it). An unlogged load (burn-in, warm-up) runs -T real
 # seconds, so the watchers have something to stop; a measured (-l) run returns
 # at once with -T seconds of synthetic per-transaction log. FAKE_PGBENCH_DELAY
-# sleeps before a measured run, FAKE_PGBENCH_FAIL_T fails the run with that -T.
+# sleeps before a measured run, FAKE_PGBENCH_FAIL_T fails the run with that -T,
+# FAKE_PGBENCH_FAIL_ONCE=N fails the N-th measured run of the dry run (once),
+# FAKE_TPS_JITTER=j scales each measured run's transaction count by 1 +- j.
 import os, sys, time, random
 a = sys.argv[1:]
 with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[pgbench] " + " ".join(a) + "\n")
@@ -12,6 +14,13 @@ if "-i" in a:
 T = int(a[a.index("-T") + 1]); log = "-l" in a; P = "-P" in a
 if os.environ.get("FAKE_PGBENCH_FAIL_T") == str(T):
     print("pgbench: error: connection lost (fake)", file=sys.stderr); sys.exit(2)
+if log and os.environ.get("FAKE_PGBENCH_FAIL_ONCE"):
+    counter, marker = os.environ["DRYRUN"] + "/.measured-runs", os.environ["DRYRUN"] + "/.failed-once"
+    count = (int(open(counter).read()) if os.path.exists(counter) else 0) + 1
+    open(counter, "w").write(str(count))
+    if count == int(os.environ["FAKE_PGBENCH_FAIL_ONCE"]) and not os.path.exists(marker):
+        open(marker, "w").close()
+        print("pgbench: error: connection lost (fake, once)", file=sys.stderr); sys.exit(2)
 if log and os.environ.get("FAKE_PGBENCH_DELAY"):
     time.sleep(float(os.environ["FAKE_PGBENCH_DELAY"]))
 if not log:
@@ -22,10 +31,12 @@ if P:
 n = failed = 0
 if log:
     start = int(time.time()) - T
+    jitter = float(os.environ.get("FAKE_TPS_JITTER", "0"))
+    lines = int(T * 20 * (1 + random.uniform(-jitter, jitter)))
     for suffix in ("", ".1"):
         with open(f"pgbench_log.{os.getpid()}{suffix}", "w") as f:
-            for i in range(T * 20):
-                fin = start + i / 20 + 0.5; lat = int(random.lognormvariate(11.5, 0.4))
+            for i in range(lines):
+                fin = start + i * T / lines + 0.5; lat = int(random.lognormvariate(11.5, 0.4))
                 if i % 5000 == 4999: f.write(f"{i%12} {i} failed 0 {int(fin)} {int((fin%1)*1e6)}\n"); failed += 1
                 else: f.write(f"{i%12} {i} {lat} 0 {int(fin)} {int((fin%1)*1e6)}\n"); n += 1
 else:

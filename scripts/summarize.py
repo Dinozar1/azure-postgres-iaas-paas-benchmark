@@ -4,6 +4,7 @@
 Usage: summarize.py <environment-or-summary.csv> [...]
        summarize.py --alignment-check <phase> <environment-or-summary.csv> [...]
        summarize.py --trend <environment-or-summary.csv> [...]
+       summarize.py --needs-sessions <max> <environment-or-summary.csv> [...]
 
 The statistical unit is the SESSION (one deployment of the environment), not
 the run: runs of one session share a host and its neighbours, so they are not
@@ -31,6 +32,16 @@ agreed warning sign that the real checkpoint cycle is not 600 s: the campaign
 stops and the finding is reported. --alignment-check prints only that share
 for the given phase and exits 3 when it is over the limit (run-campaign.sh
 calls it after every session).
+
+Runs of a campaign session that failed (a row with a non-zero exit status in
+campaign/sessions.csv) are left out everywhere, with a note on stderr: such a
+session is incomplete and its slot was run again (run-campaign.sh retries).
+
+--needs-sessions is the campaign's stopping rule: it prints, one per line, the
+configurations whose 95% CI of mean TPS across sessions (phase main,
+steady-state runs) is wider than +-5% — or not yet defined, with fewer than 2
+sessions — and that have fewer than <max> sessions. The reasoning goes to
+stderr. CI width only: the means themselves decide nothing.
 
 --trend reports drift within sessions: for each session, the least-squares
 slope of TPS against the run's position in the session (1..n), with its 95%
@@ -154,11 +165,51 @@ def report(rows, indent):
         print(line)
 
 
+LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "campaign", "sessions.csv")
+
+
+def failed_sessions():
+    """session_ids of campaign sessions that ended with a non-zero exit status."""
+    if not os.path.exists(LEDGER):
+        return set()
+    with open(LEDGER, newline="") as f:
+        return {r["session_id"] for r in csv.DictReader(f) if r["exit_status"] != "0" and r["session_id"]}
+
+
 def load(arg):
     path = arg if arg.endswith(".csv") else os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "results", arg, "summary.csv")
     with open(path, newline="") as f:
-        return os.path.normpath(path), list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    failed = failed_sessions()
+    dropped = sorted({r.get("session_id") for r in rows if r.get("session_id") in failed})
+    if dropped:
+        print(f"note: {os.path.normpath(path)}: runs of failed campaign session(s) {', '.join(dropped)}"
+              " left out (campaign/sessions.csv)", file=sys.stderr)
+    return os.path.normpath(path), [r for r in rows if r.get("session_id") not in failed]
+
+
+def needs_sessions(path, rows, max_sessions):
+    """Stopping rule for one configuration: True when it needs another session."""
+    steady = [r for r in rows if r.get("phase") == "main" and r.get("steady_state") in ("true", "n/a") and r.get("tps")]
+    sessions = {}
+    for r in steady:
+        sessions.setdefault(r.get("session_id") or "?", []).append(float(r["tps"]))
+    means = [statistics.fmean(v) for v in sessions.values()]
+    k = len(means)
+    if k >= max_sessions:
+        print(f"{path}: k={k} sessions, at the maximum of {max_sessions} — no more", file=sys.stderr)
+        return False
+    if k < 2:
+        print(f"{path}: k={k} session(s), 95% CI not defined yet — needs another", file=sys.stderr)
+        return True
+    _, mean, _, half = interval(means)
+    pct = 100 * half / mean if mean else float("inf")
+    wider = pct > TARGET_PCT
+    print(f"{path}: k={k} sessions, mean TPS {mean:.2f}, 95% CI (t, df={k - 1}) ±{half:.2f} = ±{pct:.1f}% of mean"
+          f" — {'WIDER than' if wider else 'within'} ±{TARGET_PCT:.0f}%{', needs another' if wider else ''}",
+          file=sys.stderr)
+    return wider
 
 
 def alignment(phase, rows):
@@ -227,6 +278,15 @@ def trend(path, rows):
 
 
 def main(args):
+    if args[:1] == ["--needs-sessions"]:
+        if len(args) < 3 or not args[1].isdigit():
+            print(__doc__, file=sys.stderr)
+            return 2
+        for arg in args[2:]:
+            path, rows = load(arg)
+            if needs_sessions(path, rows, int(args[1])):
+                print(arg)
+        return 0
     if args[:1] == ["--trend"]:
         if len(args) < 2:
             print(__doc__, file=sys.stderr)
