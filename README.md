@@ -65,7 +65,7 @@ Each measured run is a warm-up (not counted) followed by a 10-minute
 `pgbench` window: 600 s equals `checkpoint_timeout`, so every window holds
 exactly one checkpoint cycle whatever phase it starts in. `init-db.sh` checks
 `checkpoint_timeout` before loading and stops the session if it differs, and
-the `checkpoint_aligned` column of `summary.csv` confirms one timed and no
+the `checkpoint_aligned` column of `summary.csv` confirms one completed and no
 requested checkpoint per window.
 
 The same steps by hand:

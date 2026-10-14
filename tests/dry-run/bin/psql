@@ -2,7 +2,8 @@
 # Fake psql: canned answers for every query the scripts send. Cumulative
 # counters grow by one step per snapshot, so a measured window holds exactly
 # one timed checkpoint; FAKE_CHECKPOINTS_REQ=1 adds a requested one per
-# snapshot, FAKE_CHECKPOINT_TIMEOUT changes the reported checkpoint_timeout.
+# snapshot, FAKE_CHECKPOINT_TIMEOUT changes the reported checkpoint_timeout,
+# FAKE_TIMED_STUCK=1 keeps checkpoints_timed from moving (published late, as on E20).
 import os, sys
 a = sys.argv[1:]
 with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[psql] " + " ".join(a)[:150] + "\n")
@@ -27,7 +28,9 @@ if not cmds:
         if not line: continue
         if "pg_stat_io" in line: out.write("snapshot_at," + "\n2026-10-07 10:00:00+00,".join(io_rows(k)) + "\n")
         elif "pg_stat_database" in line: out.write(f"snapshot_at,datid,datname,blks_read,blks_hit\n2026-10-07 10:00:00+00,16384,pgbench_db,{k*1000},{k*99000}\n")
-        elif "pg_stat_bgwriter" in line: out.write(f"snapshot_at,checkpoints_timed,checkpoints_req\n2026-10-07 10:00:00+00,{k},{req}\n")
+        elif "pg_stat_bgwriter" in line:
+            timed = 0 if os.environ.get("FAKE_TIMED_STUCK") == "1" else k
+            out.write(f"snapshot_at,checkpoints_timed,checkpoints_req,checkpoint_write_time\n2026-10-07 10:00:00+00,{timed},{req},{k * 539500}\n")
         elif "pg_total_relation_size" in line: out.write(f"snapshot_at,accounts_bytes\n2026-10-07 10:00:00+00,{13000000000 + k * 1000000}\n")
     sys.exit(0)
 for c in cmds:

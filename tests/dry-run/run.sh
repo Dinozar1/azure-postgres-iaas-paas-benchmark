@@ -135,12 +135,18 @@ scenario_iaas() {
 scenario_gp() {
   echo "== gp: paas-general-purpose, 2 runs, --phase main"
   sandbox gp paas-general-purpose
+  # checkpoints_timed published late (0 in the window): alignment still holds
+  # by the completed checkpoint, as on E20.
+  export FAKE_TIMED_STUCK=1
   check "session exits 0" session paas-general-purpose 2 --phase main
+  unset FAKE_TIMED_STUCK
   local csv="$SB/repo/results/paas-general-purpose/summary.csv"
   check "summary.csv has 2 runs" rows "$csv" 2
   check "phase main" all_equal "$csv" phase main
   check "steady_state n/a (no criterion for GP)" all_equal "$csv" steady_state n/a
   check "one session_id" distinct "$csv" session_id 1
+  check "checkpoints_timed 0, one completed: aligned" all_equal "$csv" checkpoint_aligned true
+  check "checkpoints_completed recorded" all_equal "$csv" checkpoints_completed 1
   check "fixed warm-up: WARMUP_STOP=fixed" grep -rqx 'WARMUP_STOP=fixed' "$SB/repo/results/paas-general-purpose" --include=meta.env
   check "checkpoint_timeout checked at init" grep -qx 'CHECKPOINT_TIMEOUT_S=600' "$SB"/repo/results/paas-general-purpose/init-*.env
   check "no fake pgbench left running" no_fake_pgbench_left

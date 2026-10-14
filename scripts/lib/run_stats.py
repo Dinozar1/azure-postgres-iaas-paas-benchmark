@@ -42,6 +42,7 @@ COLUMNS = [
     "io_write_time_ms",
     "checkpoints_timed",
     "checkpoints_req",
+    "checkpoints_completed",
     "checkpoint_aligned",
     "accounts_bytes_before",
     "accounts_bytes_after",
@@ -50,6 +51,11 @@ COLUMNS = [
 PERCENTILES = [("lat_p50_ms", 50), ("lat_p95_ms", 95), ("lat_p99_ms", 99), ("lat_p999_ms", 99.9)]
 EDGE_WINDOW_S = 180  # the "first / last 3 minutes" of the measured run
 DEFAULT_DURATION_S = 600
+# Write phase of one timed checkpoint: checkpoint_completion_target (0.9, the
+# default on both arms) x checkpoint_timeout (600 s). pg_stat_bgwriter adds a
+# checkpoint's write time when the checkpoint completes, so the delta of
+# checkpoint_write_time over this counts the checkpoints completed in the window.
+CHECKPOINT_WRITE_S = 0.9 * 600
 
 
 def open_text(path):
@@ -175,9 +181,15 @@ def pg_stat_deltas(run_dir):
         before, after = pair[0][0], pair[1][0]
         for col in ("checkpoints_timed", "checkpoints_req"):
             out[col] = f"{num(after[col]) - num(before[col]):.0f}"
-        # The window is one checkpoint cycle: aligned means exactly one timed
-        # checkpoint in it and no requested (WAL-volume) one.
-        aligned = out["checkpoints_timed"] == "1" and out["checkpoints_req"] == "0"
+        write_s = (num(after["checkpoint_write_time"]) - num(before["checkpoint_write_time"])) / 1000
+        out["checkpoints_completed"] = f"{round(write_s / CHECKPOINT_WRITE_S):.0f}"
+        # The window is one checkpoint cycle: aligned means exactly one
+        # checkpoint completed in it and no requested (WAL-volume) one.
+        # Completions, not checkpoints_timed: that counter grows when a
+        # checkpoint starts but is published late and irregularly while the
+        # checkpointer lags behind its write schedule (E20, 2026-10-13), so a
+        # window equal to the period could show 0 or 2 (CLAUDE.md).
+        aligned = out["checkpoints_completed"] == "1" and out["checkpoints_req"] == "0"
         out["checkpoint_aligned"] = "true" if aligned else "false"
 
     # pg_total_relation_size('pgbench_accounts') around the window: not a

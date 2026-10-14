@@ -15,7 +15,7 @@ WARMUP_CHECK_SECONDS=60     # adaptive warm-up: how often the pools are read
 # both arms (Azure's setting, carried over to IaaS), so a 600 s window holds
 # exactly one timed checkpoint whatever phase it starts in. init-db.sh checks
 # the server's checkpoint_timeout equals this, and summary.csv flags each run
-# (checkpoint_aligned: one timed checkpoint, none requested). The pilot used
+# (checkpoint_aligned: one checkpoint completed in the window, none requested). The pilot used
 # 720 s, which held one or two checkpoints depending on phase — on the E20's
 # ~500 IOPS that alone moved TPS by ~15%. No CHECKPOINT is forced before the
 # window: that would start every run right after a full flush of dirty pages,
