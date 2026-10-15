@@ -137,9 +137,11 @@ scenario_gp() {
   sandbox gp paas-general-purpose
   # checkpoints_timed published late (0 in the window): alignment still holds
   # by the completed checkpoint, as on E20.
-  export FAKE_TIMED_STUCK=1
+  # Also: sshd refuses the first cloud-init status read (package upgrade).
+  export FAKE_TIMED_STUCK=1 FAKE_SSH_REFUSE_ONCE=1
   check "session exits 0" session paas-general-purpose 2 --phase main
-  unset FAKE_TIMED_STUCK
+  unset FAKE_TIMED_STUCK FAKE_SSH_REFUSE_ONCE
+  check "refused ssh during cloud-init retried" grep -q 'ssh connection failed (ssh: connect to host .* Connection refused), retrying' "$SB/session.out"
   local csv="$SB/repo/results/paas-general-purpose/summary.csv"
   check "summary.csv has 2 runs" rows "$csv" 2
   check "phase main" all_equal "$csv" phase main
@@ -271,9 +273,9 @@ scenario_rule_extend() {
   sandbox rule_extend paas-general-purpose
   four_rounds_of paas-general-purpose
   local ledger="$SB/repo/campaign/sessions.csv" order="$SB/repo/campaign/round-order.csv"
-  export FAKE_TPS_JITTER=0.5 FAKE_PGBENCH_FAIL_ONCE=2
+  export FAKE_TPS_SESSION_SPREAD=0.3 FAKE_PGBENCH_FAIL_ONCE=2
   check "campaign --stopping-rule exits 0" campaign --stopping-rule
-  unset FAKE_TPS_JITTER FAKE_PGBENCH_FAIL_ONCE
+  unset FAKE_TPS_SESSION_SPREAD FAKE_PGBENCH_FAIL_ONCE
   check "ledger: failed attempt, its retry, then rounds 2-6" \
     grep -Eq '^[1-9][0-9]* 0 0 0 0 0 0 $' <<<"$(col "$ledger" exit_status | tr '\n' ' ')"
   check "round 5 drawn with seed 20261014" grep -q '^# rounds 5-5: seed=20261014' "$order"

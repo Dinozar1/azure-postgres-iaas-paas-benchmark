@@ -5,11 +5,16 @@
 # at once with -T seconds of synthetic per-transaction log. FAKE_PGBENCH_DELAY
 # sleeps before a measured run, FAKE_PGBENCH_FAIL_T fails the run with that -T,
 # FAKE_PGBENCH_FAIL_ONCE=N fails the N-th measured run of the dry run (once),
-# FAKE_TPS_JITTER=j scales each measured run's transaction count by 1 +- j.
+# FAKE_TPS_SESSION_SPREAD=s scales the transaction count of every measured run
+# of the n-th session (n-th pgbench -i) by 1, 1+s, 1-s, 1, 1+s, ... — sessions
+# that differ by design, so the stopping rule's CI is wide every time.
 import os, sys, time, random
 a = sys.argv[1:]
 with open(os.environ["DRYRUN"] + "/calls.log", "a") as f: f.write("[pgbench] " + " ".join(a) + "\n")
+counter = os.environ["DRYRUN"] + "/.sessions"
 if "-i" in a:
+    sessions = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, "w").write(str(sessions + 1))
     print("done in 1.23 s (drop tables 0.00 s, create tables 0.01 s, client-side generate 1.00 s, vacuum 0.10 s, primary keys 0.12 s).", file=sys.stderr); sys.exit(0)
 T = int(a[a.index("-T") + 1]); log = "-l" in a; P = "-P" in a
 if os.environ.get("FAKE_PGBENCH_FAIL_T") == str(T):
@@ -31,8 +36,9 @@ if P:
 n = failed = 0
 if log:
     start = int(time.time()) - T
-    jitter = float(os.environ.get("FAKE_TPS_JITTER", "0"))
-    lines = int(T * 20 * (1 + random.uniform(-jitter, jitter)))
+    spread = float(os.environ.get("FAKE_TPS_SESSION_SPREAD", "0"))
+    session = int(open(counter).read()) if os.path.exists(counter) else 1
+    lines = int(T * 20 * (1 + spread * (session % 3 - 1 if session % 3 else -1)))
     for suffix in ("", ".1"):
         with open(f"pgbench_log.{os.getpid()}{suffix}", "w") as f:
             for i in range(lines):

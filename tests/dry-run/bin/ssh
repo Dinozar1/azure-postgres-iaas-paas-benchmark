@@ -3,4 +3,11 @@
 while [ $# -gt 0 ]; do case "$1" in -i|-o) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
 echo "[ssh] $*" | cut -c1-120 >>"$DRYRUN/calls.log"
+# FAKE_SSH_REFUSE_ONCE=1: the first cloud-init status read is refused, as when
+# sshd restarts during cloud-init's package upgrade.
+if [ "${FAKE_SSH_REFUSE_ONCE:-0}" = 1 ] && [[ "$*" == *"cloud-init status --long"* ]] && [ ! -e "$DRYRUN/.ssh-refused" ]; then
+  : >"$DRYRUN/.ssh-refused"
+  echo "ssh: connect to host 203.0.113.10 port 22: Connection refused" >&2
+  exit 255
+fi
 cd "$DRYRUN/remote-home" && HOME="$DRYRUN/remote-home" exec bash -c "$*"

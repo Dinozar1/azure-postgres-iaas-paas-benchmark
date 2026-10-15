@@ -115,7 +115,7 @@ trap 'on_signal 129 "hung up"' HUP
 
 # wait_for_cloud_init <public_ip> <label>
 wait_for_cloud_init() {
-  local ip="$1" label="$2" i status
+  local ip="$1" label="$2" i status rc
   for i in $(seq 1 30); do
     ssh "${SSH_OPTS[@]}" -o BatchMode=yes "${SSH_USER}@${ip}" true 2>/dev/null && break
     [ "$i" -eq 30 ] && {
@@ -127,8 +127,18 @@ wait_for_cloud_init() {
   # --wait prints progress dots on the line it later ends with the status, so
   # the wait and the status read are two commands: the second prints clean
   # lines. stderr stays in, so a failure explains itself in the session log.
-  status="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-    "cloud-init status --wait >/dev/null; cloud-init status --long" 2>&1 || true)"
+  # cloud-init's package_upgrade can upgrade openssh-server and restart sshd
+  # while we connect (round 4, 2026-10-15: "Connection refused" right after a
+  # successful login, twice), so a connection error (ssh exit status 255) is
+  # retried for up to 5 minutes; a cloud-init failure is not.
+  for i in $(seq 1 30); do
+    rc=0
+    status="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+      "cloud-init status --wait >/dev/null; cloud-init status --long" 2>&1)" || rc=$?
+    [ "$rc" -eq 255 ] || break
+    echo "   $label: ssh connection failed ($(tail -n1 <<<"$status")), retrying in 10s"
+    sleep 10
+  done
   if ! grep -q '^status: done' <<<"$status"; then
     echo "ERROR: cloud-init on $label ($ip) did not finish cleanly:" >&2
     echo "$status" >&2

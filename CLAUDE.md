@@ -203,6 +203,23 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 - Najpewniejsza przyczyna: `checkpoints_timed` rośnie przy starcie checkpointu, ale jest publikowany w `pg_stat_bgwriter` z opóźnieniem — checkpointer wysyła statystyki pośrednie tylko wtedy, gdy nadąża z harmonogramem zapisu, a na E20 (500 IOPS) zapis jest spóźniony; zmienne opóźnienie publikacji daje 0 albo 2 w oknie równym okresowi. Na P20/GP/B1ms zapis nadąża i licznik jest stabilny.
 - Licznik zakończeń (Δ`checkpoint_write_time` / 540 s, 540 = `checkpoint_completion_target` 0,9 × 600 s) we wszystkich oknach 600 s: 49/50 = 1, jeden przypadek 0 (GP, runda 1, przebieg 1 — granica okna); E20 10/10 = 1.
 
+## Runda 2 (P20), runda 3 i część rundy 4 — zatrzymanie na awarii SSH (2026-10-14/16)
+
+Łańcuch z 2026-10-14 (20:00 PL, nowa definicja `checkpoint_aligned`): P20 rundy 2 → cała runda 3 (E20, GP, P20, B1ms) → runda 4: B1ms (1. próba: `RegionalAllocationFailed` — „We do not have sufficient capacity for the requested compute size in this region”, chwilowy brak mocy w regionie; ponowienie po 10 min udane) → P20 **padł dwa razy** (00:02 i 00:20 PL, 16.10) → stop według reguły. Obie próby P20 i nieudana próba B1ms padły przed `init-db` (brak `session_id`, brak przebiegów — nic do wyłączania z analizy). Azure posprzątany. `checkpoint_aligned = false` w fazie `main`: 0/15 P20, 0/15 E20, 0/20 B1ms, 1/15 GP.
+
+**Przyczyna awarii P20:** obie próby: `apply` OK, pierwsze połączenie SSH do klienta OK, a drugie (odczyt statusu cloud-init) — `Connection refused`. cloud-init klienta i VM bazy ma `package_upgrade: true`; aktualizacja `openssh-server` restartuje `sshd` w trakcie startu VM (najpewniej świeża aktualizacja pakietu — sesje wcześniej tego dnia przechodziły). **Poprawka (2026-10-16):** `wait_for_cloud_init` w `run-session.sh` ponawia odczyt statusu przy błędzie połączenia (kod `ssh` 255) do 5 min; błąd samego cloud-init nadal przerywa sesję. Dry-run: `FAKE_SSH_REFUSE_ONCE`. Wersja PostgreSQL przez całą kampanię bez zmian: 16.15 na obu ramionach (`server_version` w `summary.csv`), więc `package_upgrade` nie zmienił silnika.
+
+**Stan po rundzie 3 (+ B1ms rundy 4)** — średnie TPS sesji (stan ustalony), 95% CI z t po sesjach:
+
+| konfiguracja | średnie sesji | k | średnia | SD średnich | 95% CI | vs ±5% |
+|---|---|---|---|---|---|---|
+| iaas-premium-ssd | 917,5 / 912,5 / 972,7 | 3 | 934,2 | 33,4 | ±83,0 (±8,9%) | szerszy |
+| iaas-standard-ssd | 177,5 / 170,5 / 170,7 | 3 | 172,9 | 4,0 | ±9,8 (±5,7%) | szerszy |
+| paas-burstable | 120,0 / 121,1 / 123,7 / 120,8 | 4 | 121,4 | 1,6 | ±2,6 (±2,1%) | w normie |
+| paas-general-purpose | 1343,2 / 1370,3 / 1364,3 | 3 | 1359,3 | 14,2 | ±35,3 (±2,6%) | w normie |
+
+Trend E20 w sesji: runda 1 −4,12% / przebieg (CI wyklucza 0), runda 2 −2,20%, runda 3 −2,19% (obie: CI obejmuje 0).
+
 ## Okno pomiaru = jeden cykl checkpointu (decyzja 2026-10-08, wdrożona 2026-10-09)
 
 - **Okno pomiaru 600 s** (`MEASURE_SECONDS`) = `checkpoint_timeout` (600 s, przeniesiony z PaaS GP — parytet). Okno obejmuje dokładnie jeden pełny cykl checkpointu, więc każda faza cyklu (zrzut brudnych stron, przerwa między checkpointami) jest w oknie dokładnie raz, a średnia z okna nie zależy od tego, w którym miejscu cyklu pomiar wystartował. Przy 720 s okno miało 1 albo 2 checkpointy zależnie od długości warm-upu (sesja 3 pilotażu: 2 checkpointy → 155–158 TPS, 1 → 168–185 TPS).
@@ -480,7 +497,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - **Faza 1 — ZAMKNIĘTA** (2026-09-27): pierwszy realny przebieg end-to-end na `iaas-standard-ssd` (apply → cloud-init → `init-db.sh` → pomiar → `collect-results.sh` → destroy). 7 poprawek z pierwszego testu: Ubuntu 24.04 zamiast 22.04, bez `postgresql-contrib-16`, klient przypięty do `postgresql-16`, `pg_conftool` zamiast `sed`, klucz RSA zamiast ed25519, SSH keepalive, dyski 512 GB zamiast 128 GB. Wynik referencyjny (206,6 TPS, 121,0 ms, Standard SSD **128 GB**) to wyłącznie test pipeline'u — konfiguracja porzucona, nie wchodzi do zbioru danych. Jego katalog przeniesiony do `results/_archive/iaas-standard-ssd-128gb-pilot-20260927/`.
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - **Faza 3 — ZAMKNIĘTA (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi); wnioski 2026-10-09: okno pomiaru 600 s, sesja jako jednostka statystyczna, plan kampanii z regułą zatrzymania. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
-- **Faza 4 — W TOKU (start 2026-10-09 wieczorem):** readcache sesja 1 (wszystkie `false`) i runda 1 zakończone 2026-10-10; readcache sesja 2 i 3 z 4 sesji rundy 2 zakończone 2026-10-13, potem stop na regule `checkpoint_aligned` (E20 30%, fałszywy alarm licznika — sekcja "Readcache sesja 2 i runda 2"); 2026-10-14 nowa definicja `checkpoint_aligned` i wznowienie: P20 rundy 2, rundy 3–4, reguła zatrzymania (rundy 5–6). Kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
+- **Faza 4 — W TOKU (start 2026-10-09 wieczorem):** readcache sesja 1 (wszystkie `false`) i runda 1 zakończone 2026-10-10; readcache sesja 2 i 3 z 4 sesji rundy 2 zakończone 2026-10-13, potem stop na regule `checkpoint_aligned` (E20 30%, fałszywy alarm licznika — sekcja "Readcache sesja 2 i runda 2"); 2026-10-14 nowa definicja `checkpoint_aligned` i wznowienie: P20 rundy 2, runda 3 i B1ms rundy 4 zakończone; 2026-10-16 stop na podwójnej awarii P20 rundy 4 (restart `sshd` w cloud-init — poprawione, sekcja "Runda 2 (P20), runda 3…"). Dalej: P20, GP, E20 rundy 4, reguła zatrzymania (rundy 5–6). Kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
 - Faza 5: analiza wyników + rozdział 5
 - Faza 6: rozdział 6 (wnioski)
 - Faza 7: redakcja, poprawki promotora, złożenie w APD
