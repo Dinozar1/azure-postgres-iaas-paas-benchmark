@@ -1,0 +1,385 @@
+% Rozdział 5 — szkic (wygenerowany 2026-10-17 na podstawie analysis/, commit kampanii 2287a55).
+% Wymaga w preambule: \usepackage{booktabs}, \usepackage{graphicx}.
+% Tabele i rysunki: skopiuj katalogi analysis/tables/ i analysis/figures/ do Overleafa
+% jako tables/ i figures/ (ścieżki poniżej są względne do katalogu głównego projektu).
+% Liczby w tekście pochodzą z analysis/results.csv i analysis/cost.csv — po ponownym
+% uruchomieniu scripts/analyze.py sprawdź, czy się nie zmieniły.
+% Jedyny odsyłacz spoza rozdziału: \ref{ch:metodyka} — dopasuj do etykiety rozdziału 4.
+
+\chapter{Analiza wyników, wykorzystania zasobów i efektywności finansowej}
+\label{ch:wyniki}
+
+W rozdziale przedstawiono wyniki kampanii pomiarowej przeprowadzonej według metodyki
+opisanej w rozdziale~\ref{ch:metodyka}. Najpierw omówiono przepustowość i~opóźnienia
+czterech konfiguracji, następnie wykorzystanie zasobów i~wąskie gardła, wpływ warstwy
+dyskowej, fazy przejściowe związane z~mechanizmami kredytowymi oraz zmienność wyników
+między wdrożeniami. Rozdział zamyka eksperyment wyjaśniający dotyczący pamięci podręcznej
+hosta i~analiza efektywności finansowej, łącząca wydajność z~kosztem utrzymania.
+
+\section{Zakres danych i sposób prezentacji wyników}
+\label{sec:wyniki-zakres}
+
+Kampania główna objęła 18 sesji pomiarowych wykonanych między 10 a~17 października 2026~r.
+w~regionie Belgium Central: po cztery sesje konfiguracji PaaS General Purpose, IaaS
+Premium SSD i~PaaS Burstable oraz sześć sesji konfiguracji IaaS Standard SSD. Każda sesja
+była osobnym wdrożeniem środowiska (od \texttt{terraform apply} do \texttt{terraform destroy})
+i~obejmowała pięć 10-minutowych przebiegów pomiarowych, co daje 90 przebiegów. Kolejność
+sesji w~czterech pierwszych rundach wylosowano przed rozpoczęciem kampanii jako kwadrat
+łaciński, a~dodatkowe sesje konfiguracji IaaS Standard SSD wynikają z~reguły zatrzymania
+(cel: 95-procentowy przedział ufności średniej przepustowości nie szerszy niż $\pm5\%$
+średniej, maksymalnie sześć sesji). Przebiegi pilotażowe, wykonane według wcześniejszej
+wersji protokołu, nie wchodzą do analizy.
+
+Jednostką statystyczną jest sesja, a~nie pojedynczy przebieg: przebiegi jednej sesji
+korzystają z~tego samego wdrożenia (tych samych maszyn, dysku i~serwera), więc nie są
+niezależnymi próbami konfiguracji. Każdą wielkość wyznaczono jako średnią przebiegów
+w~sesji, a~następnie średnią tych średnich po sesjach; podawany przedział to 95-procentowy
+przedział ufności średniej z~rozkładu t-Studenta o~$k-1$ stopniach swobody, gdzie $k$
+oznacza liczbę sesji. Do analizy głównej wchodzą wyłącznie przebiegi spełniające
+zdefiniowane przed pilotażem kryterium stanu ustalonego (wyczerpane wszystkie pule
+kredytów, które pod tym obciążeniem się wyczerpują). Przebiegi niespełniające kryterium
+pozostawiono w~danych i~uwzględniono w~analizie wrażliwości (podrozdział~\ref{sec:wyniki-zmiennosc}).
+Pominięto także przebiegi jednej sesji przerwanej awarią po stronie maszyny sterującej
+(podrozdział~\ref{sec:wyniki-zmiennosc}); jej miejsce zajęła sesja powtórzona.
+
+\section{Przepustowość i opóźnienia}
+\label{sec:wyniki-wydajnosc}
+
+Tabela~\ref{tab:wydajnosc} i~rysunek~\ref{fig:tps} zestawiają przepustowość (liczbę
+transakcji na sekundę, TPS) oraz opóźnienia transakcji. Najwyższą przepustowość osiągnęła
+konfiguracja PaaS General Purpose: $1358{,}3 \pm 18{,}7$~TPS, o~45\% więcej niż IaaS
+Premium SSD ($935{,}5 \pm 43{,}6$~TPS). Konfiguracje ograniczone małym budżetem zasobów
+uzyskały wartości o~rząd wielkości niższe: IaaS Standard SSD $172{,}4 \pm 15{,}1$~TPS,
+a~PaaS Burstable $121{,}4 \pm 2{,}6$~TPS. Przedziały ufności nie nakładają się dla żadnej
+pary konfiguracji, a~najmniejsza różnica (IaaS Standard SSD wobec PaaS Burstable) wynosi
+42\%, więc kolejność konfiguracji jest jednoznaczna.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Przepustowość i opóźnienia transakcji (średnia średnich sesji $\pm$ 95\% przedział ufności; $k$ — liczba sesji)}
+  \label{tab:wydajnosc}
+  \small
+  \input{tables/performance.tex}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/tps.pdf}
+  \caption{Przepustowość konfiguracji: puste punkty — średnie poszczególnych sesji, pełny punkt — średnia z~95\% przedziałem ufności (skala logarytmiczna)}
+  \label{fig:tps}
+\end{figure}
+
+Średnie opóźnienie transakcji jest w~każdej konfiguracji zgodne z~prawem Little'a dla
+stałej liczby 25 klientów ($\bar{L} \approx 25/\mathrm{TPS}$), co potwierdza, że klienci
+pracowali w~pętli zamkniętej bez czasu oczekiwania, a~przepustowość i~średnie opóźnienie
+niosą tę samą informację. Różnią się natomiast ogony rozkładu (rysunek~\ref{fig:latencja}).
+W~konfiguracji PaaS General Purpose 99. percentyl wynosi $47{,}3$~ms, a~w~IaaS Premium SSD
+$69{,}0$~ms. W~konfiguracji IaaS Standard SSD p99 sięga ok. 400~ms, a~w~PaaS Burstable
+przekracza sekundę ($1012{,}7 \pm 109{,}7$~ms), przy p50 tylko ok. 115--120~ms: rozkład
+opóźnień jest tam silnie prawostronnie skośny. Wynika to z~mechanizmu kredytowego CPU
+(podrozdział~\ref{sec:wyniki-bursting}): w~stanie wyczerpanych kredytów moc obliczeniowa
+jest przydzielana nierównomiernie, co wydłuża czas obsługi części transakcji. Przedziały
+ufności dla p99 są szersze niż dla wartości średnich (np. $\pm 13\%$ dla IaaS Premium SSD),
+ponieważ percentyl ogonowy jest wrażliwy na pojedyncze zdarzenia w~oknie pomiaru, takie
+jak zapis checkpointu.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/latency.pdf}
+  \caption{Percentyle opóźnienia transakcji p50, p95 i~p99 (średnie z~95\% przedziałami ufności, skala logarytmiczna)}
+  \label{fig:latencja}
+\end{figure}
+
+\section{Wykorzystanie zasobów i wąskie gardła}
+\label{sec:wyniki-zasoby}
+
+Tabela~\ref{tab:zasoby} przedstawia wykorzystanie zasobów w~oknach pomiarowych według
+metryk Azure Monitor, a~tabela~\ref{tab:latencja-io} — opóźnienia operacji wejścia/wyjścia
+mierzone po stronie platformy i~wewnątrz PostgreSQL (widok \texttt{pg\_stat\_io}).
+Zestawienie pozwala wskazać wąskie gardło każdej konfiguracji.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Wykorzystanie zasobów w~oknie pomiaru: IOPS dysku danych, liczba operacji I/O na transakcję, wykorzystanie limitu IOPS dysku, CPU i~szczytowe wykorzystanie RAM}
+  \label{tab:zasoby}
+  \resizebox{\textwidth}{!}{\input{tables/resources.tex}}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Opóźnienia operacji I/O: latencja dysku według Azure Monitor (dostępna tylko dla maszyn wirtualnych), średni czas odczytu i~zapisu bloku według \texttt{pg\_stat\_io} oraz udział trafień w~buforze \texttt{shared\_buffers}}
+  \label{tab:latencja-io}
+  \resizebox{\textwidth}{!}{\input{tables/io-latency.tex}}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{IaaS Premium SSD i~IaaS Standard SSD} są ograniczone przez dysk: wykorzystanie
+  limitu IOPS dysku wynosi odpowiednio $98{,}2\%$ i~$99{,}0\%$, przy CPU na poziomie $38{,}8\%$
+  i~$11{,}2\%$. Dysk pracuje na poziomie bazowym swojego tieru (2300 i~500~IOPS), a~procesor
+  ma zapas.
+  \item \textbf{PaaS General Purpose} jest ograniczony przez CPU ($83{,}9\%$), a~dysk pracuje
+  na $69{,}9\%$ limitu. Usługa dostarcza przy tym więcej operacji odczytu, niż wynika
+  z~limitu dysku: wykorzystanie limitu odpowiada w~przybliżeniu samym zapisom, co wskazuje,
+  że odczyty są w~dużej części obsługiwane przez pamięć podręczną hosta. Potwierdza to
+  średni czas odczytu bloku: $1{,}60$~ms wobec $5{,}09$~ms na IaaS Premium SSD, mimo
+  identycznej wielkości i~klasy dysku.
+  \item \textbf{PaaS Burstable} jest ograniczony przez CPU ($84{,}9\%$ mocy przyciętej do
+  poziomu bazowego po wyczerpaniu kredytów), a~dysk wykorzystuje zaledwie $8{,}3\%$ limitu.
+  Jako jedyna konfiguracja ma też wyraźnie dłuższy czas zapisu bloku ($1{,}19$~ms wobec
+  setnych części milisekundy w~pozostałych), co jest zgodne z~brakiem mocy obliczeniowej
+  na obsługę zapisu.
+\end{itemize}
+
+Liczba operacji I/O przypadających na transakcję mieści się w~przedziale 2,5--3,7 i~jest
+najwyższa w~konfiguracjach z~najmniejszym budżetem zasobów. Udział trafień w~buforze
+\texttt{shared\_buffers} wynosi 92--94\% we wszystkich konfiguracjach, co jest zgodne
+z~założeniem projektu: baza o~rozmiarze 14,6~GiB nie mieści się w~8~GiB pamięci serwera,
+więc obciążenie wymusza rzeczywiste operacje dyskowe. Wykorzystanie pamięci RAM nie było
+ograniczeniem w~żadnej konfiguracji; wartości dla IaaS i~PaaS nie są jednak bezpośrednio
+porównywalne, ponieważ pochodzą z~różnych metryk (\texttt{Available Memory Bytes} traktuje
+pamięć podręczną systemu plików jako dostępną, \texttt{memory\_percent} usługi zarządzanej
+— jako zajętą), a~serwer PaaS Burstable ma tylko 2~GiB pamięci.
+
+\section{Wpływ warstwy dyskowej}
+\label{sec:wyniki-dysk}
+
+Konfiguracje IaaS różnią się wyłącznie tierem dysku danych o~tej samej pojemności 512~GB,
+więc ich porównanie izoluje wpływ warstwy dyskowej. Dysk Premium SSD P20 zapewnił
+$5{,}4$-krotnie wyższą przepustowość niż Standard SSD E20 ($935{,}5$ wobec $172{,}4$~TPS),
+przy $4{,}6$-krotnej różnicy provisionowanych IOPS (2300 wobec 500). Przewaga większa niż
+stosunek IOPS wynika z~większej liczby operacji na transakcję na dysku E20 ($3{,}28$ wobec
+$2{,}51$): przy małym budżecie IOPS zapis checkpointu zajmuje znaczną część dostępnych
+operacji i~ogranicza odczyty potrzebne transakcjom. Efekt ten widać w~przebiegu
+przepustowości w~czasie (rysunek~\ref{fig:burnin-e20}) jako oscylacje o~okresie ok. 10~minut,
+równym parametrowi \texttt{checkpoint\_timeout}. Okno pomiaru o~długości dokładnie jednego
+cyklu checkpointu (600~s) sprawia, że każdy przebieg obejmuje każdą fazę cyklu raz,
+niezależnie od momentu startu; kontrola licznikami \texttt{pg\_stat\_bgwriter} potwierdziła
+jeden zakończony checkpoint w~89 z~90 okien pomiarowych.
+
+Różnicę widać także w~opóźnieniach operacji dyskowych: latencja dysku według Azure Monitor
+wynosi $8{,}66$~ms dla P20 i~$51{,}61$~ms dla E20, a~średni czas odczytu bloku w~PostgreSQL
+odpowiednio $5{,}09$ i~$25{,}92$~ms. Ponieważ procesor konfiguracji E20 jest wykorzystany
+w~$11\%$, maszyna wirtualna tej samej klasy co w~konfiguracji P20 pozostaje w~dużej mierze
+bezczynna --- o~wydajności decyduje wyłącznie tier dysku.
+
+\section{Fazy przejściowe: mechanizmy kredytowe}
+\label{sec:wyniki-bursting}
+
+Trzy z~czterech konfiguracji korzystają z~mechanizmów kredytowych, które przez pewien czas
+pozwalają przekroczyć poziom bazowy zasobu: pula kredytów burst dysku (IaaS) i~kredyty CPU
+(PaaS Burstable). Wynik pomiaru zależy więc od stanu puli przed jego rozpoczęciem. Z~tego
+powodu każda sesja zaczynała się adaptacyjnym burn-inem trwającym do wyczerpania pul, które
+pod danym obciążeniem się wyczerpują (minimum 60~minut), a~przed każdym przebiegiem
+adaptacyjny warm-up ponownie doprowadzał pule do wyczerpania. Tabela~\ref{tab:burnin}
+podsumowuje fazy burn-inu wszystkich sesji, a~rysunki~\ref{fig:burnin-p20}--\ref{fig:burnin-b1ms}
+pokazują ich przebieg w~pierwszych sesjach kampanii.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Fazy burn-inu: liczba i~czas trwania burn-inów, moment wyczerpania puli kredytów oraz średnia przepustowość przed wyczerpaniem i~po nim (wartości z~burn-inu, bez resetu stanu bazy — nie są bezpośrednio porównywalne z~przebiegami pomiarowymi)}
+  \label{tab:burnin}
+  \small
+  \input{tables/burnin.tex}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/burnin-iaas-premium-ssd.pdf}
+  \caption{Burn-in konfiguracji IaaS Premium SSD (pierwsza sesja kampanii): przepustowość w~kolejnych minutach i~zużycie puli kredytów burst dysku}
+  \label{fig:burnin-p20}
+\end{figure}
+
+W~konfiguracji IaaS Premium SSD faza burstu trwała 32--57 minut i~dawała ok. 1210~TPS;
+po wyczerpaniu puli przepustowość spadła do ok. 910~TPS, czyli o~ok. 25\%. Pomiar
+wykonany bez burn-inu, bezpośrednio po wdrożeniu, zawyżałby więc wydajność tego tieru
+o~jedną trzecią i~opisywałby stan, którego dysk nie jest w~stanie utrzymać. Dysk Standard
+SSD E20 ma niewielki margines burstu (600 wobec 500~IOPS), więc spadek po wyczerpaniu puli
+był mały (ok. 214 → 198~TPS, $-7\%$). Wyczerpanie puli następowało zwykle po 31--36
+minutach, ale w~jednej sesji dopiero po 145 minutach --- dysk tej instancji wykonywał
+mniej operacji ponad poziom bazowy, co adaptacyjny burn-in wykrył i~wydłużył bez
+interwencji.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/burnin-iaas-standard-ssd.pdf}
+  \caption{Burn-in konfiguracji IaaS Standard SSD (pierwsza sesja kampanii); widoczne oscylacje przepustowości o~okresie cyklu checkpointu}
+  \label{fig:burnin-e20}
+\end{figure}
+
+Najdłuższą fazę przejściową ma PaaS Burstable: kredyty CPU zmniejszały się w~tempie
+ok. 0,12 na minutę i~wyczerpywały po 196--217 minutach, po czym przepustowość spadała
+z~ok. 230 do ok. 150~TPS (rysunek~\ref{fig:burnin-b1ms}). W~pierwszych ok. 30 minutach
+widoczna jest dodatkowo krótsza faza burstu operacji I/O po stronie warstwy obliczeniowej,
+dla której usługa nie publikuje metryki. Stan utrzymywalny tej konfiguracji zaczyna się
+więc dopiero po ponad trzech godzinach ciągłego obciążenia. Konfiguracja PaaS General Purpose
+nie ma puli, która by się wyczerpywała; jej burn-in miał stałą długość 60 minut i~stabilną
+przepustowość.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/burnin-paas-burstable.pdf}
+  \caption{Burn-in konfiguracji PaaS Burstable (pierwsza sesja kampanii): przepustowość i~pozostałe kredyty CPU}
+  \label{fig:burnin-b1ms}
+\end{figure}
+
+Znaczenie kryterium stanu ustalonego pokazało zdarzenie z~jednej sesji konfiguracji IaaS
+Premium SSD: po wyczerpaniu puli w~trakcie burn-inu metryka zużycia kredytów w~ciągu pięciu
+minut spadła ze 100\% do 5\%, czego pod ciągłym obciążeniem nie da się wyjaśnić odnawianiem
+puli --- najpewniej nastąpił reset kredytów po stronie platformy. Cztery kolejne przebiegi
+mierzyły ponownie dysk w~fazie burstu (do 1391~TPS); kryterium stanu ustalonego oznaczyło
+je jako nieważne, a~sesja weszła do analizy głównej jednym przebiegiem.
+
+\section{Zmienność między wdrożeniami i analiza wrażliwości}
+\label{sec:wyniki-zmiennosc}
+
+Tabela~\ref{tab:zmiennosc} porównuje odchylenie standardowe średnich sesji (zmienność między
+wdrożeniami) z~odchyleniem standardowym przebiegów w~obrębie sesji (powtarzalność pomiaru
+na jednym wdrożeniu). W~konfiguracjach PaaS General Purpose i~IaaS Standard SSD zmienność
+między wdrożeniami jest większa niż w~obrębie sesji (stosunek $1{,}83$ i~$1{,}36$): kolejne
+wdrożenie tej samej konfiguracji trafia na inny sprzęt i~daje inny wynik. W~przypadku IaaS
+Standard SSD średnie sesji wahały się od $153{,}6$ do $196{,}8$~TPS, co przy sześciu sesjach
+dało przedział ufności $\pm8{,}7\%$ średniej --- jedyny szerszy od założonego celu $\pm5\%$.
+Zgodnie z~planem kampanii raportowana jest osiągnięta precyzja. Gdyby jednostką statystyczną
+był pojedynczy przebieg, przedziały ufności byłyby zaniżone, ponieważ nie obejmowałyby
+zmienności między wdrożeniami. W~konfiguracji PaaS Burstable jest odwrotnie: pojedyncze
+przebiegi różnią się znacznie (współczynnik zmienności $8{,}5\%$, efekt krótkich zrywów
+przydziału CPU w~stanie wyczerpanych kredytów), ale średnie sesji są bardzo zgodne ($1{,}3\%$).
+
+\begin{table}[htbp]
+  \centering
+  \caption{Zmienność przepustowości: odchylenie standardowe średnich sesji i~średnie odchylenie standardowe przebiegów w~sesji (TPS), współczynniki zmienności oraz ich stosunek}
+  \label{tab:zmiennosc}
+  \small
+  \input{tables/variance.tex}
+\end{table}
+
+Tabela~\ref{tab:wrazliwosc} pokazuje, jak zmieniłaby się średnia przepustowość przy innych
+regułach doboru przebiegów. Uwzględnienie przebiegów niespełniających kryterium stanu
+ustalonego zmienia wynik tylko dla IaaS Premium SSD (z~$935{,}5$ do $985{,}1$~TPS i~z~przedziałem
+$\pm14\%$) --- są to przebiegi zmierzone w~fazie burstu, opisane wyżej. Wykluczenie jedynego
+okna bez dokładnie jednego zakończonego checkpointu nie zmienia wyników. Dołączenie
+przebiegów sesji przerwanej awarią maszyny sterującej (zapełniony dysk lokalny uniemożliwił
+usunięcie środowiska po kompletnym pomiarze) zmienia wynik IaaS Standard SSD w~granicach
+przedziału ufności ($169{,}9 \pm 13{,}6$~TPS). Wnioski z~analizy głównej są więc odporne
+na przyjęte reguły.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Analiza wrażliwości średniej przepustowości [TPS] na reguły doboru przebiegów}
+  \label{tab:wrazliwosc}
+  \resizebox{\textwidth}{!}{\input{tables/sensitivity.tex}}
+\end{table}
+
+\section{Eksperyment wyjaśniający: pamięć podręczna hosta}
+\label{sec:wyniki-cache}
+
+Wyniki sanity checków wskazywały, że część przewagi PaaS General Purpose nad IaaS Premium SSD
+może wynikać z~pamięci podręcznej hosta, z~której korzysta usługa zarządzana, a~której
+dysk danych IaaS świadomie nie używał (\texttt{caching = None}). Przed pomiarem sformułowano
+hipotezę, że po włączeniu pamięci podręcznej odczytu konfiguracja IaaS Premium SSD zbliży się
+do PaaS General Purpose, a~wąskim gardłem stanie się CPU. Eksperyment, wykonany poza główną
+macierzą w~jednej ważnej sesji (pierwsza sesja nie dała przebiegów w~stanie ustalonym z~powodu
+progu wyczerpania kredytów CPU, skorygowanego na podstawie krzywej kredytów z~burn-inu),
+przedstawia tabela~\ref{tab:cache}. Ze względu na jedną sesję wyniki mają charakter opisowy.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Eksperyment wyjaśniający: IaaS Premium SSD z~pamięcią podręczną odczytu hosta na tle konfiguracji bez niej i~PaaS General Purpose (dla eksperymentu jedna sesja, $n=4$ przebiegi --- bez przedziału ufności)}
+  \label{tab:cache}
+  \resizebox{\textwidth}{!}{\input{tables/explanatory.tex}}
+\end{table}
+
+Pamięć podręczna odczytu zmniejszyła obciążenie dysku z~$98{,}2\%$ do ok. $50\%$ limitu IOPS
+i~skróciła średni czas odczytu bloku z~$5{,}09$ do $0{,}96$~ms, a~więc usunęła wąskie gardło
+dyskowe. Przepustowość wzrosła jednak tylko o~ok. 3,5\% (do $968{,}4$~TPS), a~wykorzystanie
+CPU ($39{,}3\%$) odpowiada poziomowi bazowemu maszyny \texttt{Standard\_B2s\_v2} (40\%),
+przy kredytach CPU utrzymujących się na minimalnym poziomie. Nowym wąskim gardłem stał się
+więc procesor, ale nie jego pełna moc, tylko poziom bazowy maszyny klasy burstable.
+Hipoteza potwierdziła się w~części dotyczącej przesunięcia wąskiego gardła na CPU, nie
+potwierdziła się w~części dotyczącej zbliżenia do PaaS General Purpose. Różnica między
+modelami w~parze IaaS Premium SSD / PaaS General Purpose wynika więc z~dwóch czynników
+naraz: z~pamięci podręcznej hosta po stronie usługi zarządzanej oraz z~klasy jednostki
+obliczeniowej (2~vCore bez mechanizmu kredytowego wobec maszyny z~poziomem bazowym 40\%).
+
+\section{Efektywność finansowa}
+\label{sec:wyniki-koszty}
+
+Koszt utrzymania wyznaczono z~cennika katalogowego Azure (model pay-as-you-go, region
+Belgium Central, USD; migawka cennika z~17 października 2026~r. zapisana w~repozytorium),
+uwzględniając wyłącznie zasoby strony bazy danych: maszynę wirtualną albo jednostkę
+obliczeniową usługi zarządzanej oraz magazyn danych. Pominięto maszynę kliencką, publiczne
+adresy IP służące do administracji i~sieć, ponieważ stanowią narzędzie pomiarowe, a~nie
+element konfiguracji. Miesiąc przyjęto jako 730~godzin. Dla dysku Standard SSD uwzględniono
+opłatę za transakcje (0,002~USD za 10~tys.), naliczaną od 2023~r. tylko do godzinowego limitu
+zależnego od rozmiaru dysku; dla E20 wynosi on 502~tys. transakcji na godzinę. Dysk E20
+wykonywał pod tym obciążeniem ok. 560~IOPS (ok. 2~mln operacji na godzinę), więc zawsze
+osiągał limit. Rzeczywisty rachunek subskrypcji nie mógł posłużyć za źródło kosztów,
+ponieważ w~danych Cost Management nie pojawiła się żadna pozycja usługi Azure Database for
+PostgreSQL, a~pozostałe pozycje obejmowały także narzędzie pomiarowe. Składniki kosztu
+przedstawia tabela~\ref{tab:koszt-skladniki}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Składniki godzinowego kosztu utrzymania strony bazy danych według cennika pay-as-you-go [USD/h]}
+  \label{tab:koszt-skladniki}
+  \small
+  \input{tables/cost-components.tex}
+\end{table}
+
+Efektywność finansową wyrażono jako liczbę transakcji przypadających na jednego dolara
+kosztu utrzymania, czyli $\mathrm{TPS} \cdot 3600 / c_h$, gdzie $c_h$ to koszt godzinowy;
+przedział ufności wynika z~przedziału ufności przepustowości, ponieważ koszt cennikowy jest
+stały. Wyniki przedstawiają tabela~\ref{tab:koszt-efektywnosc} i~rysunek~\ref{fig:koszt}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Koszt utrzymania i~efektywność finansowa (w~nawiasach 95\% przedziały ufności wynikające z~niepewności przepustowości)}
+  \label{tab:koszt-efektywnosc}
+  \resizebox{\textwidth}{!}{\input{tables/cost-efficiency.tex}}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/cost-efficiency.pdf}
+  \caption{Liczba transakcji na 1~USD kosztu utrzymania (cennik pay-as-you-go) z~95\% przedziałami ufności}
+  \label{fig:koszt}
+\end{figure}
+
+Najwyższą efektywność finansową mają konfiguracje PaaS General Purpose ($16{,}35$~mln
+transakcji na dolara) i~IaaS Premium SSD ($16{,}07$~mln). Ich przedziały ufności nakładają
+się, więc na podstawie pomiarów nie można wskazać, która jest efektywniejsza: PaaS General
+Purpose jest o~45\% wydajniejszy i~o~43\% droższy w~utrzymaniu (218 wobec 153~USD miesięcznie).
+Usługa zarządzana zapewnia przy tym w~tej cenie funkcje, których konfiguracja IaaS nie
+obejmuje i~które wymagałyby dodatkowej pracy administracyjnej (automatyczne kopie zapasowe
+z~odtwarzaniem do punktu w~czasie, aktualizacje, monitorowanie). Konfiguracja PaaS Burstable
+jest najtańsza w~utrzymaniu (85~USD miesięcznie), ale daje $4{,}3$-krotnie mniej transakcji
+na dolara niż PaaS General Purpose; ponad 80\% jej kosztu przypada na magazyn danych
+o~pojemności 512~GiB, przyjętej w~projekcie eksperymentu dla zachowania jednakowej warstwy
+dyskowej we wszystkich konfiguracjach. Najniższą efektywność finansową ma IaaS Standard SSD
+($2{,}46$~mln transakcji na dolara): opłata za transakcje dysku ($0{,}100$~USD/h) jest prawie
+dwukrotnie wyższa niż koszt samej pojemności dysku, przez co pod intensywnym obciążeniem
+losowym konfiguracja ta jest droższa w~godzinie niż IaaS Premium SSD, a~przy tym $5{,}4$-krotnie
+wolniejsza. Tani w~pojemności dysk Standard SSD jest więc nieopłacalny dla obciążeń
+transakcyjnych z~dużą liczbą operacji I/O.
+
+\section{Podsumowanie wyników}
+\label{sec:wyniki-podsumowanie}
+
+\begin{itemize}
+  \item Kolejność wydajności jest jednoznaczna: PaaS General Purpose ($1358$~TPS) $>$ IaaS
+  Premium SSD ($936$) $>$ IaaS Standard SSD ($172$) $>$ PaaS Burstable ($121$); dla trzech
+  konfiguracji osiągnięto precyzję lepszą niż $\pm5\%$, dla IaaS Standard SSD $\pm8{,}7\%$
+  przy sześciu wdrożeniach.
+  \item Konfiguracje IaaS są ograniczone przez dysk, konfiguracje PaaS --- przez CPU;
+  usługa zarządzana częściowo omija limit dysku dzięki pamięci podręcznej hosta.
+  \item Tier dysku decyduje o~wydajności IaaS: Premium SSD P20 daje $5{,}4$-krotnie wyższą
+  przepustowość niż Standard SSD E20 o~tej samej pojemności.
+  \item Mechanizmy kredytowe zawyżają wydajność w~pierwszych dziesiątkach minut (do
+  ok. 33\% dla Premium SSD) lub godzinach (PaaS Burstable) po wdrożeniu; rzetelny pomiar
+  stanu utrzymywalnego wymaga ich wyczerpania i~kontroli stanu pul w~każdym przebiegu.
+  \item Zmienność między wdrożeniami tej samej konfiguracji przewyższa zmienność między
+  powtórzeniami na jednym wdrożeniu, co uzasadnia przyjęcie sesji jako jednostki statystycznej.
+  \item Efektywność finansowa PaaS General Purpose i~IaaS Premium SSD jest statystycznie
+  nierozróżnialna (ok. 16~mln transakcji na dolara); PaaS Burstable i~IaaS Standard SSD są
+  4--7-krotnie mniej efektywne.
+\end{itemize}

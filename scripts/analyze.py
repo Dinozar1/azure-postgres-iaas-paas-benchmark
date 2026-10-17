@@ -102,11 +102,16 @@ METRICS = [
 ]
 
 
-def session_stats(rows, extract):
-    """k, mean, SD, CI half-width and session means of one metric (steady-state runs)."""
+def steady(r):
+    return r.get("steady_state") in ("true", "n/a")
+
+
+def session_stats(rows, extract, keep=steady):
+    """k, mean, SD, CI half-width and session means of one metric (steady-state runs by default)."""
     sessions = {}
+    within = []
     for r in rows:
-        if r.get("steady_state") not in ("true", "n/a"):
+        if not keep(r):
             continue
         v = extract(r)
         if v is not None:
@@ -114,9 +119,37 @@ def session_stats(rows, extract):
     means = [statistics.fmean(v) for _, v in sorted(sessions.items())]
     if not means:
         return None
+    within = [statistics.stdev(v) for v in sessions.values() if len(v) >= 2]
     k, mean, sd, half = S.interval(means)
     return {"k": k, "mean": mean, "sd": sd, "half": half, "session_means": means,
-            "n_runs": sum(len(v) for v in sessions.values())}
+            "n_runs": sum(len(v) for v in sessions.values()),
+            "within_sd": statistics.fmean(within) if within else None}
+
+
+def load_rows_with_failed(env, phase):
+    """Like load_rows, but keeps the runs of failed campaign sessions (a sensitivity check only)."""
+    with open(os.path.join(ROOT, "results", env, "summary.csv"), newline="") as f:
+        return [r for r in csv.DictReader(f) if r.get("phase") == phase]
+
+
+def burnin_phases(env):
+    """Per main-phase burn-in: duration, minute the pool first read spent, mean TPS before / after it."""
+    pool = {"paas-burstable": ("cpu_credits_remaining", lambda v: v <= 1)}.get(
+        env, ("Data Disk Used Burst IO Credits Percentage", lambda v: v >= 99))
+    out = []
+    for d in sorted(glob.glob(os.path.join(ROOT, "results", env, "burnin-*"))):
+        if not os.path.exists(os.path.join(d, "burnin-azure-metrics.json")) or \
+                "PHASE=main" not in open(os.path.join(d, "meta.env")).read():
+            continue
+        tps, series, start = burnin_series(d)
+        pts = [(minutes_between(start, t), v) for t, v in series.get(pool[0], [])]
+        spent = next((m for m, v in pts if pool[1](v)), None) if env != "paas-general-purpose" else None
+        before = [v for m, v in tps if 3 <= m < (spent if spent else float("inf"))]
+        after = [v for m, v in tps if spent is not None and m >= spent + 2]
+        out.append({"minutes": tps[-1][0] if tps else None, "spent": spent,
+                    "before": statistics.fmean(before) if before else None,
+                    "after": statistics.fmean(after) if after else None})
+    return out
 
 
 def load_rows(env, phase):
@@ -455,6 +488,58 @@ def main(argv):
           f"{fmt(r['tx_per_usd_m'], 2)} [{fmt(r['tx_per_usd_m_lo'], 2)}; {fmt(r['tx_per_usd_m_hi'], 2)}]",
           f"{fmt(r['usd_per_m_tx'], 3)} [{fmt(r['usd_per_m_tx_lo'], 3)}; {fmt(r['usd_per_m_tx_hi'], 3)}]"]
          for r in cost_rows[:len(CONFIGS)]], "lrrrrr"))
+
+    # sensitivity: the main analysis against every run, without misaligned runs,
+    # and with the runs of failed campaign sessions put back
+    sens = []
+    for env, label, _ in CONFIGS:
+        rows = load_rows(env, "main")
+        tps = lambda r: num(r, "tps")  # noqa: E731
+        sens.append([label, pm(stats[env]["tps"], 1),
+                     pm(session_stats(rows, tps, keep=lambda r: True), 1),
+                     pm(session_stats(rows, tps, keep=lambda r: steady(r) and r.get("checkpoint_aligned") != "false"), 1),
+                     pm(session_stats(load_rows_with_failed(env, "main"), tps), 1)])
+    write(os.path.join(tdir, "sensitivity.tex"), table(
+        ["Konfiguracja", "analiza główna", "wszystkie przebiegi", "bez checkpoint\_aligned = false",
+         "z sesjami nieudanymi"], sens, "lrrrr"))
+
+    # variance: between sessions (the unit) against within a session (descriptive)
+    var_rows = []
+    for env, label, _ in CONFIGS:
+        s = stats[env]["tps"]
+        var_rows.append([label, str(s["k"]), fmt(s["sd"], 1), fmt(100 * s["sd"] / s["mean"], 1),
+                         fmt(s["within_sd"], 1), fmt(100 * s["within_sd"] / s["mean"], 1),
+                         fmt(s["sd"] / s["within_sd"], 2) if s["within_sd"] else "--"])
+    write(os.path.join(tdir, "variance.tex"), table(
+        ["Konfiguracja", "$k$", "SD między sesjami", "CV [\\%]", "SD w sesji", "CV [\\%]", "stosunek"],
+        var_rows, "lrrrrrr"))
+
+    # explanatory experiment next to the configurations it explains
+    expl = []
+    for env in ("iaas-premium-ssd", EXPLANATORY[0], "paas-general-purpose"):
+        st = stats[env]
+        expl.append([PLAIN[env].replace("_", "\\_"), str(st["tps"]["k"]), pm(st["tps"], 1), pm(st["cpu_pct"], 1),
+                     pm(st["read_iops"], 0), pm(st["write_iops"], 0), pm(st["disk_iops_consumed_pct"], 1),
+                     pm(st["pg_read_ms"], 2)])
+    write(os.path.join(tdir, "explanatory.tex"), table(
+        ["Konfiguracja", "$k$", "TPS", "CPU [\\%]", "IOPS odczyt", "IOPS zapis", "limit IOPS dysku [\\%]",
+         "odczyt bloku [ms]"], expl, "lrrrrrrr"))
+
+    # burn-in phases (descriptive: every main-phase burn-in, the failed attempt's included)
+    burn_rows = []
+    for env, label, _ in CONFIGS:
+        ph = burnin_phases(env)
+        spent = [p["spent"] for p in ph if p["spent"] is not None]
+        before = [p["before"] for p in ph if p["before"] is not None]
+        after = [p["after"] for p in ph if p["after"] is not None]
+        mins = [p["minutes"] for p in ph if p["minutes"]]
+        rng = lambda v, d=0: (f"{fmt(min(v), d)}--{fmt(max(v), d)}" if v and min(v) != max(v)  # noqa: E731
+                              else fmt(v[0], d) if v else "--")
+        burn_rows.append([label, str(len(ph)), rng(mins), rng(spent), fmt(statistics.fmean(before), 0) if before else "--",
+                          fmt(statistics.fmean(after), 0) if after else "--"])
+    write(os.path.join(tdir, "burnin.tex"), table(
+        ["Konfiguracja", "burn-iny", "czas [min]", "pula wyczerpana po [min]", "TPS przed", "TPS po"],
+        burn_rows, "lrrrrr"))
 
     # --- figures ---
     plt = setup_matplotlib()

@@ -224,7 +224,7 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 
 ## Kampania zakończona (2026-10-17) — wyniki główne
 
-Łańcuch z 2026-10-16 (8:59 PL): reszta rundy 4 (P20, GP, E20) → reguła zatrzymania: P20 ±4,7%, B1ms ±2,1%, GP ±1,4% w normie, E20 ±9,6% → runda 5 (E20, ziarno 20261014) → E20 ±6,6% → runda 6 (E20, ziarno 20261015) → koniec na limicie 6 sesji (11:38 PL). Azure posprzątany (zostaje `rg-tfstate-pgbench` z archiwum `results`). `checkpoint_aligned = false` w całej kampanii: 1/95 przebiegów (GP, runda 1).
+Łańcuch z 2026-10-16 (8:59 PL): reszta rundy 4 (P20, GP, E20) → reguła zatrzymania: P20 ±4,7%, B1ms ±2,1%, GP ±1,4% w normie, E20 ±9,6% → runda 5 (E20, ziarno 20261014) → E20 ±6,6% → runda 6 (E20, ziarno 20261015) → koniec na limicie 6 sesji (11:38 PL). Azure posprzątany (zostaje `rg-tfstate-pgbench` z archiwum `results`). `checkpoint_aligned = false` w całej kampanii: 1/90 przebiegów analizy (GP, runda 1); 90 = 18 sesji × 5, bez 5 przebiegów nieudanej próby rundy 5.
 
 **Analiza główna** (faza `main`, przebiegi w stanie ustalonym, sesje nieudane pominięte; średnia średnich sesji, SD średnich sesji, 95% CI z t, df = k − 1):
 
@@ -499,6 +499,7 @@ azure-postgres-iaas-paas-benchmark/
 ├── campaign/                     # round-order.csv: wylosowana kolejność rund (ziarno, data, metoda);
 │                                  # sessions.csv: faktyczny przebieg kampanii (run-campaign.sh)
 ├── analysis/                     # wyniki fazy 5: tabele LaTeX, wykresy PDF, CSV, migawka cennika
+├── thesis/                       # szkice rozdziałów pracy (LaTeX) do przeniesienia do Overleafa
 ├── tests/dry-run/                # run.sh + fałszywe ssh/terraform/az/psql/pgbench: całe sesje bez Azure
 ├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
 │   └── _archive/                  # pilotaż 128 GB i sanity checki — poza zbiorem danych
@@ -543,7 +544,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - **Faza 3 — ZAMKNIĘTA (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi); wnioski 2026-10-09: okno pomiaru 600 s, sesja jako jednostka statystyczna, plan kampanii z regułą zatrzymania. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
 - **Faza 4 — ZAMKNIĘTA (2026-10-09 – 2026-10-17):** readcache sesja 1 (wszystkie `false`) i runda 1 zakończone 2026-10-10; readcache sesja 2 i 3 z 4 sesji rundy 2 zakończone 2026-10-13, potem stop na regule `checkpoint_aligned` (E20 30%, fałszywy alarm licznika — sekcja "Readcache sesja 2 i runda 2"); 2026-10-14 nowa definicja `checkpoint_aligned` i wznowienie: P20 rundy 2, runda 3 i B1ms rundy 4 zakończone; 2026-10-16 stop na podwójnej awarii P20 rundy 4 (restart `sshd` w cloud-init — poprawione, sekcja "Runda 2 (P20), runda 3…"); wznowienie 2026-10-16, reszta rundy 4 i rundy 5–6 (tylko E20). **ZAMKNIĘTA 2026-10-17** — sekcja "Kampania zakończona". Kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
-- **Faza 5 — W TOKU (2026-10-17):** analiza i model kosztów gotowe (sekcja "Faza 5"); dalej rozdział 5.
+- **Faza 5 — W TOKU (2026-10-17):** analiza i model kosztów gotowe (sekcja "Faza 5"); szkic rozdziału 5 w `thesis/05-wyniki.tex` (do przeniesienia do Overleafa razem z `analysis/tables/` i `analysis/figures/` jako `tables/`, `figures/`) — czeka na redakcję autora.
 - Faza 6: rozdział 6 (wnioski)
 - Faza 7: redakcja, poprawki promotora, złożenie w APD
 

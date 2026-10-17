@@ -1,0 +1,9 @@
+\begin{tabular}{lrrrrrrr}
+\toprule
+Konfiguracja & $k$ & TPS & CPU [\%] & IOPS odczyt & IOPS zapis & limit IOPS dysku [\%] & odczyt bloku [ms] \\
+\midrule
+IaaS Premium SSD P20 & 4 & 935,5\,$\pm$\,43,6 & 38,8\,$\pm$\,1,5 & 1\,132\,$\pm$\,62 & 1\,215\,$\pm$\,63 & 98,2\,$\pm$\,3,2 & 5,09\,$\pm$\,0,60 \\
+IaaS Premium SSD P20 + cache odczytu & 1 & 968,4 & 39,3 & 1\,231 & 1\,191 & 50,2 & 0,96 \\
+PaaS General Purpose (D2s\_v3) & 4 & 1\,358,3\,$\pm$\,18,7 & 83,9\,$\pm$\,1,0 & 1\,931\,$\pm$\,54 & 1\,678\,$\pm$\,50 & 69,9\,$\pm$\,2,1 & 1,60\,$\pm$\,0,19 \\
+\bottomrule
+\end{tabular}
