@@ -16,3 +16,7 @@ round,position,environment,seed
 4,2,iaas-premium-ssd,20261009
 4,3,paas-general-purpose,20261009
 4,4,iaas-standard-ssd,20261009
+# rounds 5-5: seed=20261014 drawn_at=2026-10-16T18:05:39Z method=random Latin square (rows, columns, symbols of a cyclic square permuted)
+5,1,iaas-standard-ssd,20261014
+# rounds 6-6: seed=20261015 drawn_at=2026-10-17T03:10:45Z method=random Latin square (rows, columns, symbols of a cyclic square permuted)
+6,1,iaas-standard-ssd,20261015
