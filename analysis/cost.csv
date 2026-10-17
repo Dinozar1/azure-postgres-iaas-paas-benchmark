@@ -1,0 +1,27 @@
+configuration,component,usd_per_hour
+paas-general-purpose,Flexible Server D2s_v3 (2 vCore),0.20300
+paas-general-purpose,storage 512 GiB,0.09609
+paas-general-purpose,TOTAL,0.29909
+iaas-premium-ssd,VM Standard_B2s_v2 (Linux),0.09600
+iaas-premium-ssd,dysk danych Premium SSD P20 (512 GiB),0.11031
+iaas-premium-ssd,dysk systemowy Standard SSD E4,0.00329
+iaas-premium-ssd,TOTAL,0.20960
+iaas-standard-ssd,VM Standard_B2s_v2 (Linux),0.09600
+iaas-standard-ssd,dysk danych Standard SSD E20 (512 GiB),0.05260
+iaas-standard-ssd,transakcje dysku E20 (limit godzinowy),0.10040
+iaas-standard-ssd,dysk systemowy Standard SSD E4,0.00329
+iaas-standard-ssd,TOTAL,0.25229
+paas-burstable,Flexible Server B1ms (compute),0.01990
+paas-burstable,storage 512 GiB,0.09609
+paas-burstable,TOTAL,0.11599
+iaas-premium-ssd-readcache,VM Standard_B2s_v2 (Linux),0.09600
+iaas-premium-ssd-readcache,dysk danych Premium SSD P20 (512 GiB),0.11031
+iaas-premium-ssd-readcache,dysk systemowy Standard SSD E4,0.00329
+iaas-premium-ssd-readcache,TOTAL,0.20960
+
+configuration,usd_per_hour,usd_per_month_730h,tps_mean,tps_ci95_half,mln_tx_per_usd,mln_tx_per_usd_low,mln_tx_per_usd_high,usd_per_mln_tx,usd_per_mln_tx_low,usd_per_mln_tx_high
+paas-general-purpose,0.29909,218.33,1358.28,18.73,16.3490,16.1236,16.5745,0.06117,0.06033,0.06202
+iaas-premium-ssd,0.20960,153.01,935.50,43.59,16.0681,15.3194,16.8167,0.06224,0.05946,0.06528
+iaas-standard-ssd,0.25229,184.17,172.40,15.06,2.4600,2.2452,2.6749,0.40650,0.37385,0.44540
+paas-burstable,0.11599,84.67,121.39,2.59,3.7676,3.6872,3.8480,0.26542,0.25988,0.27121
+iaas-premium-ssd-readcache,0.20960,153.01,968.36,,16.6323,16.6323,16.6323,0.06012,0.06012,0.06012

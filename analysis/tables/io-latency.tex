@@ -1,0 +1,10 @@
+\begin{tabular}{lrrrr}
+\toprule
+Konfiguracja & latencja dysku, Azure [ms] & odczyt bloku, pg\_stat\_io [ms] & zapis bloku, pg\_stat\_io [ms] & trafienia w bufor [\%] \\
+\midrule
+PaaS General Purpose (D2s\_v3) & -- & 1,60\,$\pm$\,0,19 & 0,015\,$\pm$\,0,001 & 93,54\,$\pm$\,0,00 \\
+IaaS Premium SSD P20 & 8,66\,$\pm$\,0,68 & 5,09\,$\pm$\,0,60 & 0,011\,$\pm$\,0,001 & 93,51\,$\pm$\,0,07 \\
+IaaS Standard SSD E20 & 51,61\,$\pm$\,1,20 & 25,92\,$\pm$\,1,82 & 0,039\,$\pm$\,0,004 & 93,02\,$\pm$\,0,13 \\
+PaaS Burstable (B1ms) & -- & 8,44\,$\pm$\,0,95 & 1,194\,$\pm$\,0,218 & 91,96\,$\pm$\,0,02 \\
+\bottomrule
+\end{tabular}

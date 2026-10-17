@@ -1,0 +1,99 @@
+{
+  "retrieved_at": "2026-10-17T15:56:58Z",
+  "source": "https://prices.azure.com/api/retail/prices",
+  "region": "belgiumcentral",
+  "currency": "USD",
+  "price_type": "pay-as-you-go (Consumption)",
+  "prices": {
+    "vm_b2s_v2_linux": {
+      "retailPrice": 0.096,
+      "unitOfMeasure": "1 Hour",
+      "currencyCode": "USD",
+      "productName": "Virtual Machines Bsv2 Series",
+      "skuName": "B2s v2",
+      "meterName": "B2s v2",
+      "meterId": "6a995ac5-7eff-5783-8d08-777143381499",
+      "effectiveStartDate": "2026-01-01T00:00:00Z"
+    },
+    "disk_p20": {
+      "retailPrice": 80.525656,
+      "unitOfMeasure": "1/Month",
+      "currencyCode": "USD",
+      "productName": "Premium SSD Managed Disks",
+      "skuName": "P20 LRS",
+      "meterName": "P20 LRS Disk",
+      "meterId": "2d15331d-b301-58c8-86d0-53ae64fb25c3",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "disk_e20": {
+      "retailPrice": 38.4,
+      "unitOfMeasure": "1/Month",
+      "currencyCode": "USD",
+      "productName": "Standard SSD Managed Disks",
+      "skuName": "E20 LRS",
+      "meterName": "E20 LRS Disk",
+      "meterId": "fffb8ba6-ed1d-5a42-9643-0edb19376731",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "disk_e20_operations": {
+      "retailPrice": 0.002,
+      "unitOfMeasure": "10K",
+      "currencyCode": "USD",
+      "productName": "Standard SSD Managed Disks",
+      "skuName": "E20 LRS",
+      "meterName": "E20 LRS Disk Operations",
+      "meterId": "0256c2b4-7ef9-59c9-bec3-53e7d07fcb85",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "disk_e4": {
+      "retailPrice": 2.4,
+      "unitOfMeasure": "1/Month",
+      "currencyCode": "USD",
+      "productName": "Standard SSD Managed Disks",
+      "skuName": "E4 LRS",
+      "meterName": "E4 LRS Disk",
+      "meterId": "2718eb9e-3399-584c-bf8f-826e044b8bcd",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "pg_burstable_b1ms": {
+      "retailPrice": 0.0199,
+      "unitOfMeasure": "1 Hour",
+      "currencyCode": "USD",
+      "productName": "Azure Database for PostgreSQL Flexible Server Burstable BS Series Compute",
+      "skuName": "B1MS",
+      "meterName": "B1MS",
+      "meterId": "4569db58-0950-5ec2-bd38-d748c227fa32",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "pg_gp_dsv3_vcore": {
+      "retailPrice": 0.1015,
+      "unitOfMeasure": "1 Hour",
+      "currencyCode": "USD",
+      "productName": "Azure Database for PostgreSQL Flexible Server General Purpose Dsv3 Series Compute",
+      "skuName": "vCore",
+      "meterName": "vCore",
+      "meterId": "76f63f57-de0d-59b2-a6ea-bb071fe00b66",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "pg_storage": {
+      "retailPrice": 0.137,
+      "unitOfMeasure": "1 GB/Month",
+      "currencyCode": "USD",
+      "productName": "Azure Database for PostgreSQL Flex Server Storage",
+      "skuName": "Storage",
+      "meterName": "Storage Data Stored",
+      "meterId": "aaef69bc-e748-56c9-adae-835d96cddd2d",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    },
+    "pg_backup_storage": {
+      "retailPrice": 0.103,
+      "unitOfMeasure": "1 GB/Month",
+      "currencyCode": "USD",
+      "productName": "Azure Database for PostgreSQL Flexible Server Backup Storage",
+      "skuName": "Backup Storage LRS",
+      "meterName": "Backup Storage LRS Data Stored",
+      "meterId": "90309eb1-5145-54be-98b1-1f1618c58fd2",
+      "effectiveStartDate": "2025-09-01T00:00:00Z"
+    }
+  }
+}

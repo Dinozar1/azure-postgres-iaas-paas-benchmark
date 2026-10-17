@@ -203,6 +203,25 @@ N wyliczone z SD pilotażu jako najmniejsze n, przy którym t(0,975; n − 1)·S
 - Najpewniejsza przyczyna: `checkpoints_timed` rośnie przy starcie checkpointu, ale jest publikowany w `pg_stat_bgwriter` z opóźnieniem — checkpointer wysyła statystyki pośrednie tylko wtedy, gdy nadąża z harmonogramem zapisu, a na E20 (500 IOPS) zapis jest spóźniony; zmienne opóźnienie publikacji daje 0 albo 2 w oknie równym okresowi. Na P20/GP/B1ms zapis nadąża i licznik jest stabilny.
 - Licznik zakończeń (Δ`checkpoint_write_time` / 540 s, 540 = `checkpoint_completion_target` 0,9 × 600 s) we wszystkich oknach 600 s: 49/50 = 1, jeden przypadek 0 (GP, runda 1, przebieg 1 — granica okna); E20 10/10 = 1.
 
+## Faza 5 — analiza i efektywność finansowa (2026-10-17)
+
+`scripts/analyze.py` → `analysis/`: `results.csv` (każda metryka: k sesji, średnia, SD średnich sesji, 95% CI z t), `cost.csv`, `tables/*.tex` (tabulary do rozdz. 5, polski format liczb, `booktabs`), `figures/*.pdf` (+ podgląd `.png`): `tps`, `latency` (p50/p95/p99), `cost-efficiency`, `burnin-<env>` (TPS per minuta z logu `-P 60` + stan puli z Azure Monitor, pierwsza sesja kampanii). Statystyka z `summarize.py` (te same reguły: sesja jako jednostka, przebiegi w stanie ustalonym, sesje nieudane pominięte).
+
+**Model kosztów (ustalony 2026-10-17):**
+- **Cennik katalogowy, nie rachunek.** Migawka Azure Retail Prices API (publiczne, bez logowania): `analysis/prices-belgiumcentral-20261017.json` (`scripts/fetch-prices.py`), pay-as-you-go, USD, `belgiumcentral`. Rachunek subskrypcji się nie nadaje: w Cost Management **nie ma żadnej pozycji Azure Database for PostgreSQL** (mimo ~60 h pracy serwerów GP i B1ms; pakiet studencki obejmuje tylko 750 h B1MS + 32 GB storage, więc nie tłumaczy braku GP i 480 GB nadwyżki storage), a reszta rachunku miesza w to klienta testowego i publiczne IP. Do opisania jako ograniczenie (rozdz. 6).
+- **Tylko strona bazy danych:** IaaS = VM `B2s_v2` ($0,096/h) + dysk danych + dysk systemowy E4; PaaS = compute + storage 512 GiB ($0,137/GB-mies.). Bez VM-klienta, publicznych IP (dostęp SSH) i sieci — to narzędzie pomiarowe. Miesiąc = 730 h. Backup PaaS do rozmiaru storage bez opłat (7 dni ≪ 512 GiB).
+- **Transakcje Standard SSD:** $0,002 / 10 tys., ale od 2023-03-06 naliczane tylko do limitu godzinowego (E20: 502 000/h; źródło: Azure Updates „More transactions at no additional cost for Azure Standard SSD”); E20 pod tym obciążeniem robi ~560 IOPS (~2 mln/h), więc zawsze płaci limit: **$0,1004/h — prawie dwa razy więcej niż sam dysk** ($0,0526/h). Potwierdzone w rachunku: zafakturowano ~5× mniej operacji, niż dysk wykonał. P20 nie ma opłat transakcyjnych; pozycja „Disk Mount” z cennika nie była naliczana (dyski nie są współdzielone).
+
+| konfiguracja | USD/h | USD/mies. | TPS (95% CI) | mln transakcji / USD (95% CI) | USD / mln transakcji |
+|---|---|---|---|---|---|
+| PaaS GP | 0,2991 | 218,33 | 1358,3 ± 18,7 | **16,35** [16,12; 16,57] | 0,061 |
+| IaaS P20 | 0,2096 | 153,01 | 935,5 ± 43,6 | **16,07** [15,32; 16,82] | 0,062 |
+| PaaS B1ms | 0,1160 | 84,67 | 121,4 ± 2,6 | 3,77 [3,69; 3,85] | 0,265 |
+| IaaS E20 | 0,2523 | 184,17 | 172,4 ± 15,1 | 2,46 [2,25; 2,67] | 0,407 |
+
+- **Efektywność finansowa GP i P20 jest nierozróżnialna** (przedziały się nakładają): GP jest o 45% wydajniejszy i o 43% droższy. E20 jest droższy od P20 (opłaty transakcyjne) przy 5,4× mniejszym TPS — najgorsza efektywność; B1ms najtańszy w godzinie, ale 4,3× mniej transakcji na dolara niż GP. Readcache (opisowo, 1 sesja): 16,63 mln/USD przy koszcie P20 (cache hosta bez opłat).
+- **Zasoby** (`tables/resources.tex`): CPU GP 84%, B1ms 85% (wąskie gardło CPU), P20 39%, E20 11% (wąskie gardło dysku — 98–99% limitu IOPS); I/O na transakcję 2,5–3,7. RAM: IaaS z `Available Memory Bytes` (szczyt 38,6% z 8 GiB — `MemAvailable` liczy page cache jako dostępny), PaaS z `memory_percent` (GP 46%, B1ms 70% z 2 GiB) — różne definicje, porównywać ostrożnie. Latencja dysku tylko IaaS (Azure: P20 8,7 ms, E20 51,6 ms); czas odczytu bloku z `pg_stat_io` na obu ramionach: GP 1,6 ms, P20 5,1, B1ms 8,4, E20 25,9 ms.
+
 ## Kampania zakończona (2026-10-17) — wyniki główne
 
 Łańcuch z 2026-10-16 (8:59 PL): reszta rundy 4 (P20, GP, E20) → reguła zatrzymania: P20 ±4,7%, B1ms ±2,1%, GP ±1,4% w normie, E20 ±9,6% → runda 5 (E20, ziarno 20261014) → E20 ±6,6% → runda 6 (E20, ziarno 20261015) → koniec na limicie 6 sesji (11:38 PL). Azure posprzątany (zostaje `rg-tfstate-pgbench` z archiwum `results`). `checkpoint_aligned = false` w całej kampanii: 1/95 przebiegów (GP, runda 1).
@@ -473,10 +492,13 @@ azure-postgres-iaas-paas-benchmark/
 │   ├── run-session.sh <env> <N>   # cała sesja: IP → apply → init-db → burn-in → N przebiegów → teardown (pułapka: --force)
 │   ├── summarize.py <env>         # średnie sesji → k, średnia, SD, 95% CI (t, df = k − 1) — stan ustalony i wszystkie
 │   ├── draw-campaign.py           # losowanie kolejności rund kampanii → campaign/round-order.csv
+│   ├── fetch-prices.py            # migawka cennika Azure (Retail Prices API) → analysis/prices-*.json
+│   ├── analyze.py                 # analiza końcowa → analysis/ (results.csv, cost.csv, tables/, figures/)
 │   ├── run-campaign.sh            # sesje kampanii jedna po drugiej według round-order.csv → campaign/sessions.csv
 │   └── lib/run_stats.py           # percentyle latencji, TPS 3 min, delty pg_stat_* (dla collect-results)
 ├── campaign/                     # round-order.csv: wylosowana kolejność rund (ziarno, data, metoda);
 │                                  # sessions.csv: faktyczny przebieg kampanii (run-campaign.sh)
+├── analysis/                     # wyniki fazy 5: tabele LaTeX, wykresy PDF, CSV, migawka cennika
 ├── tests/dry-run/                # run.sh + fałszywe ssh/terraform/az/psql/pgbench: całe sesje bez Azure
 ├── results/                      # surowe wyniki per przebieg (gitignored); wyjątek: results/*/summary.csv
 │   └── _archive/                  # pilotaż 128 GB i sanity checki — poza zbiorem danych
@@ -521,7 +543,7 @@ Rozdziały 3-4 pisane na bieżąco podczas budowy infrastruktury (Faza 1/3/4 pla
 - Faza 2 (równolegle z 1): pisanie rozdziału 2
 - **Faza 3 — ZAMKNIĘTA (2026-10-07 – 2026-10-09)**: pilotaż (5×4 przebiegi); wnioski 2026-10-09: okno pomiaru 600 s, sesja jako jednostka statystyczna, plan kampanii z regułą zatrzymania. Kolejność konfiguracji wylosowana z ziarnem `20261007` (`random.Random(20261007).sample([iaas-standard-ssd, iaas-premium-ssd, paas-burstable, paas-general-purpose], 4)`): **iaas-premium-ssd → paas-general-purpose → iaas-standard-ssd → paas-burstable**. Każda konfiguracja = jedna sesja `run-session.sh <env> 5` (faza `pilot`). Eksperyment wyjaśniający (`iaas-premium-ssd-readcache`, 5 przebiegów) osobno, poza tą kolejnością.
 - **Faza 4 — ZAMKNIĘTA (2026-10-09 – 2026-10-17):** readcache sesja 1 (wszystkie `false`) i runda 1 zakończone 2026-10-10; readcache sesja 2 i 3 z 4 sesji rundy 2 zakończone 2026-10-13, potem stop na regule `checkpoint_aligned` (E20 30%, fałszywy alarm licznika — sekcja "Readcache sesja 2 i runda 2"); 2026-10-14 nowa definicja `checkpoint_aligned` i wznowienie: P20 rundy 2, runda 3 i B1ms rundy 4 zakończone; 2026-10-16 stop na podwójnej awarii P20 rundy 4 (restart `sshd` w cloud-init — poprawione, sekcja "Runda 2 (P20), runda 3…"); wznowienie 2026-10-16, reszta rundy 4 i rundy 5–6 (tylko E20). **ZAMKNIĘTA 2026-10-17** — sekcja "Kampania zakończona". Kampania 4 rundy × 4 konfiguracje (+ do 2 sesji z reguły zatrzymania) według `campaign/round-order.csv` — sekcja "Plan kampanii".
-- Faza 5: analiza wyników + rozdział 5
+- **Faza 5 — W TOKU (2026-10-17):** analiza i model kosztów gotowe (sekcja "Faza 5"); dalej rozdział 5.
 - Faza 6: rozdział 6 (wnioski)
 - Faza 7: redakcja, poprawki promotora, złożenie w APD
 

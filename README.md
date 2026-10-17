@@ -37,7 +37,8 @@ bootstrap/      one-off: storage account for remote state + "results" archive co
 modules/        network, linux-vm, iaas-vm, client-vm, paas-postgres, *-environment
 environments/   one thin root module per configuration, each with its own state
 scripts/        benchmark orchestration, run locally over SSH to the client VM
-campaign/       the drawn order of the measurement campaign's rounds
+campaign/       the drawn order of the campaign's rounds and the log of its sessions
+analysis/       final tables, figures and cost model (scripts/analyze.py)
 tests/dry-run/  whole sessions against fake cloud tools, no Azure involved
 results/        raw output per run (git-ignored except results/<env>/summary.csv)
 ```
@@ -111,6 +112,20 @@ or before the next session once `results/.campaign-stop` exists. With
 `--stopping-rule` it goes on after the drawn rounds: configurations whose 95%
 CI of mean TPS is wider than +-5% get one more session per extra round
 (seed 20261009 + round), up to 6 sessions each.
+
+## Analysis
+
+```sh
+scripts/fetch-prices.py   # dated snapshot of Azure list prices -> analysis/prices-<region>-<date>.json
+scripts/analyze.py        # analysis/results.csv, cost.csv, tables/*.tex, figures/*.pdf
+```
+
+`analyze.py` reports every metric per configuration with the session as the
+unit (mean of session means, SD, 95% t interval) and derives financial
+efficiency (transactions per dollar) from pay-as-you-go list prices of the
+database side only: the server and its storage, without the client VM or
+the public IPs used for SSH. Standard SSD transactions are billed up to the
+hourly cap per disk size.
 
 ## Dry run
 
