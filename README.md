@@ -39,6 +39,7 @@ environments/   one thin root module per configuration, each with its own state
 scripts/        benchmark orchestration, run locally over SSH to the client VM
 campaign/       the drawn order of the campaign's rounds and the log of its sessions
 analysis/       final tables, figures and cost model (scripts/analyze.py)
+thesis/         drafts of the thesis chapters built on analysis/ (Polish, LaTeX)
 tests/dry-run/  whole sessions against fake cloud tools, no Azure involved
 results/        raw output per run (git-ignored except results/<env>/summary.csv)
 ```

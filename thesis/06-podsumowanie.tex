@@ -1,0 +1,160 @@
+% Rozdział 6 — szkic (2026-10-17), oparty na wynikach z rozdziału 5 (thesis/05-wyniki.tex)
+% i na decyzjach zapisanych w CLAUDE.md. Bez odsyłaczy do innych rozdziałów — dodaj je przy redakcji.
+
+\chapter{Podsumowanie i wnioski}
+\label{ch:podsumowanie}
+
+\section{Realizacja celu pracy}
+\label{sec:podsumowanie-cel}
+
+Celem pracy była analiza porównawcza relacyjnego systemu bazodanowego PostgreSQL wdrażanego
+w~chmurze Microsoft Azure w~modelach IaaS i~PaaS, obejmująca wydajność, wykorzystanie zasobów
+obliczeniowych oraz efektywność finansową. Cel zrealizowano w~trzech krokach. Po pierwsze,
+zaprojektowano i~zautomatyzowano za pomocą Terraform dwa warianty środowisk: samodzielnie
+skonfigurowany serwer PostgreSQL na maszynie wirtualnej z~dwoma tierami dysku (Standard SSD
+i~Premium SSD) oraz usługę zarządzaną Azure Database for PostgreSQL --- Flexible Server
+w~dwóch tierach obliczeniowych (Burstable i~General Purpose). Każde środowisko było tworzone
+na czas sesji pomiarowej i~usuwane bezpośrednio po niej, a~konfiguracja PostgreSQL na
+maszynie wirtualnej została wyrównana z~ustawieniami, które platforma stosuje w~usłudze
+zarządzanej. Po drugie, przeprowadzono kampanię testów obciążeniowych narzędziem pgbench
+(18 wdrożeń, 90 przebiegów w~stanie ustalonym), zbierając przepustowość, opóźnienia, IOPS
+oraz wykorzystanie CPU i~pamięci. Po trzecie, połączono wyniki wydajności z~kosztem
+utrzymania wyznaczonym z~cennika, uzyskując miarę efektywności finansowej w~postaci liczby
+transakcji na dolara.
+
+\section{Wnioski}
+\label{sec:podsumowanie-wnioski}
+
+\begin{enumerate}
+  \item \textbf{Usługa zarządzana w~tierze General Purpose osiągnęła najwyższą wydajność.}
+  Przepustowość PaaS General Purpose ($1358 \pm 19$~TPS) była o~45\% wyższa niż IaaS Premium
+  SSD ($936 \pm 44$~TPS), a~99. percentyl opóźnienia niższy ($47$ wobec $69$~ms). Przewagę
+  tę tłumaczą dwa czynniki ustalone w~eksperymencie wyjaśniającym: pamięć podręczna hosta,
+  przez którą usługa zarządzana obsługuje większość odczytów poza limitem dysku, oraz klasa
+  jednostki obliczeniowej --- 2~vCore bez mechanizmu kredytowego wobec maszyny
+  \texttt{Standard\_B2s\_v2} z~poziomem bazowym 40\%. Samo włączenie pamięci podręcznej
+  odczytu na maszynie wirtualnej usunęło wąskie gardło dyskowe, ale zwiększyło przepustowość
+  tylko o~ok. 3,5\%, ponieważ ograniczeniem stał się poziom bazowy procesora.
+
+  \item \textbf{Efektywność finansowa obu modeli w~konfiguracjach o~wysokiej wydajności jest
+  porównywalna.} PaaS General Purpose i~IaaS Premium SSD dały odpowiednio $16{,}35$ i~$16{,}07$
+  mln transakcji na dolara kosztu utrzymania, z~nakładającymi się przedziałami ufności.
+  Wyższy koszt usługi zarządzanej (o~43\%) jest równoważony wyższą wydajnością, a~w~tej cenie
+  usługa obejmuje kopie zapasowe z~odtwarzaniem do punktu w~czasie, aktualizacje
+  i~monitorowanie, których koszt w~modelu IaaS ponosi administrator. Dla obciążeń
+  transakcyjnych o~skali badanej w~pracy model PaaS nie jest zatem droższy w~przeliczeniu na
+  wykonaną pracę.
+
+  \item \textbf{W~modelu IaaS o~wydajności decyduje warstwa dyskowa.} Przy tej samej maszynie
+  wirtualnej i~pojemności dysku Premium SSD P20 zapewnił $5{,}4$-krotnie wyższą przepustowość
+  niż Standard SSD E20, a~serwer z~dyskiem E20 wykorzystywał procesor w~11\%. Dysk Standard SSD
+  jest przy tym nieopłacalny pod intensywnym obciążeniem losowym: opłata za transakcje,
+  naliczana do godzinowego limitu, prawie dwukrotnie przewyższa koszt jego pojemności, przez
+  co konfiguracja z~dyskiem E20 jest droższa w~godzinie od konfiguracji z~P20 i~ma najniższą
+  efektywność finansową spośród badanych ($2{,}46$~mln transakcji na dolara).
+
+  \item \textbf{Tier Burstable usługi zarządzanej nadaje się do obciążeń okresowych, nie
+  ciągłych.} PaaS Burstable jest najtańszy w~utrzymaniu, ale w~stanie utrzymywalnym osiąga
+  $121$~TPS i~p99 opóźnienia powyżej sekundy, a~do tego stanu dochodzi dopiero po ponad
+  trzech godzinach ciągłego obciążenia, gdy wyczerpią się kredyty CPU. Wcześniej przepustowość
+  jest prawie dwukrotnie wyższa, co przy krótkich testach prowadzi do istotnego przeszacowania
+  wydajności.
+
+  \item \textbf{Mechanizmy kredytowe i~zmienność między wdrożeniami muszą być uwzględnione
+  w~metodyce.} Pomiar wykonany bezpośrednio po wdrożeniu zawyżyłby wydajność IaaS Premium SSD
+  o~ok. jedną trzecią. Zmienność wyników między kolejnymi wdrożeniami tej samej konfiguracji
+  przewyższała w~części konfiguracji zmienność między powtórzeniami na jednym wdrożeniu, więc
+  rzetelny przedział ufności wymaga wielu niezależnych wdrożeń --- co w~praktyce jest możliwe
+  dzięki automatyzacji infrastruktury jako kodu i~niskiemu kosztowi środowisk efemerycznych
+  (cała kampania z~pilotażem kosztowała ok. 20~USD).
+\end{enumerate}
+
+\section{Ograniczenia i zagrożenia trafności}
+\label{sec:podsumowanie-ograniczenia}
+
+\subsection*{Trafność wewnętrzna}
+
+\begin{itemize}
+  \item \textbf{Klasa maszyny wirtualnej.} Planowana maszyna \texttt{Standard\_D2s\_v5}
+  (bez mechanizmu kredytowego) okazała się niedostępna dla subskrypcji Azure for Students,
+  podobnie jak region Poland Central; użyto maszyny \texttt{Standard\_B2s\_v2} w~regionie
+  Belgium Central. Porównanie IaaS z~PaaS General Purpose zestawia więc maszynę klasy
+  burstable z~jednostką obliczeniową bez mechanizmu kredytowego, co --- jak pokazał
+  eksperyment wyjaśniający --- odpowiada za część różnicy wydajności. Na głównych
+  konfiguracjach IaaS kredyty CPU nie były wyczerpywane (procesor pracował poniżej poziomu
+  bazowego), więc nie ograniczały wyników.
+  \item \textbf{Pamięć podręczna hosta.} Dysk danych IaaS pracował bez pamięci podręcznej
+  hosta, aby porównanie tierów dysku mierzyło warstwę dyskową, podczas gdy usługa zarządzana
+  korzysta z~niej domyślnie. Wpływ tego wyboru oszacowano w~eksperymencie wyjaśniającym,
+  wykonanym jednak tylko w~jednej ważnej sesji.
+  \item \textbf{Mechanizmy kredytowe.} Stan pul kredytów kontrolowano metrykami Azure Monitor
+  o~ograniczonej rozdzielczości (pula burst dysku: co 5~minut), a~dla usługi zarządzanej nie
+  są publikowane metryki kredytów warstwy magazynu ani burstu I/O po stronie obliczeniowej.
+  W~jednej sesji zaobserwowano reset kredytów dysku po stronie platformy; kryterium stanu
+  ustalonego wykluczyło dotknięte nim przebiegi, ale procedura burn-inu potraktowała gwałtowny
+  powrót puli jako stabilizację, a~nie sygnał do ponownego drenażu.
+  \item \textbf{Parytet konfiguracji.} Na maszynę wirtualną przeniesiono wszystkie parametry
+  PostgreSQL wpływające na wydajność, ale nie mechanizmy specyficzne dla platformy (ciągła
+  archiwizacja WAL, rozszerzenia Azure, magazyn plików tymczasowych na dysku lokalnym). Ich
+  narzut obciąża wyniki usługi zarządzanej i~jest zarazem ceną funkcji, które zapewnia.
+  \item \textbf{Liczniki checkpointów.} Pierwotna kontrola wyrównania okna pomiaru z~cyklem
+  checkpointu opierała się na liczniku \texttt{checkpoints\_timed}, publikowanym z~opóźnieniem,
+  gdy zapis nie nadąża z~harmonogramem; zastąpiono ją liczbą zakończonych checkpointów, co
+  potwierdziło jeden cykl w~89 z~90 okien.
+  \item \textbf{Awarie infrastruktury pomiarowej.} Kampania była sterowana z~lokalnego
+  komputera; chwilowy brak miejsca na jego dysku uniemożliwił usunięcie jednego środowiska,
+  a~restart usługi SSH w~trakcie aktualizacji pakietów i~chwilowy brak mocy obliczeniowej
+  w~regionie przerwały kilka prób wdrożenia. Próby nieudane powtórzono, a~przebiegi sesji
+  przerwanej pominięto w~analizie (analiza wrażliwości pokazała, że ich dołączenie nie zmienia
+  wniosków).
+\end{itemize}
+
+\subsection*{Trafność zewnętrzna}
+
+\begin{itemize}
+  \item \textbf{Jedno obciążenie.} Wyniki dotyczą obciążenia TPC-B-podobnego narzędzia pgbench
+  (losowe, krótkie transakcje zapisujące) dla bazy 14,6~GiB i~25~klientów. Obciążenia
+  zdominowane przez odczyty, analityczne lub z~bazą mieszczącą się w~pamięci mogą dać inną
+  kolejność konfiguracji --- w~szczególności inną relację kosztu dysku Standard SSD, którego
+  opłata transakcyjna zależy od liczby operacji.
+  \item \textbf{Jeden region, jeden okres, jedna subskrypcja.} Pomiary wykonano w~regionie
+  Belgium Central w~październiku 2026~r.; wydajność współdzielonej infrastruktury może
+  zależeć od regionu i~obciążenia platformy w~czasie. Kolejność i~pora sesji były losowane
+  i~rotowane, a~zmienność między wdrożeniami ujęto w~przedziałach ufności, ale nie obejmuje
+  ona innych regionów ani dłuższych okresów.
+  \item \textbf{Rozmiar magazynu.} Pojemność 512~GiB przyjęto we wszystkich konfiguracjach dla
+  zachowania jednakowej warstwy dyskowej (przy pojemności 128~GB tiery Standard i~Premium
+  mają identyczny limit 500~IOPS, więc porównanie warstwy dyskowej nie miałoby czego mierzyć). Dla PaaS Burstable magazyn stanowi ponad 80\% kosztu, więc
+  przy mniejszej bazie relacja kosztów byłaby inna.
+\end{itemize}
+
+\subsection*{Model kosztów}
+
+\begin{itemize}
+  \item Koszty wyznaczono z~cennika katalogowego pay-as-you-go z~17~października 2026~r.,
+  bez rabatów za rezerwację, planów oszczędnościowych i~bezpłatnych limitów; ceny chmury się
+  zmieniają, dlatego migawkę cennika zapisano w~repozytorium.
+  \item Rzeczywisty rachunek subskrypcji nie mógł posłużyć do weryfikacji kosztu usługi
+  zarządzanej, ponieważ dane Cost Management nie zawierały żadnej pozycji Azure Database for
+  PostgreSQL. Dla zasobów IaaS rachunek był zgodny z~cennikiem, w~tym z~limitem naliczania
+  transakcji dysku Standard SSD.
+  \item Model obejmuje wyłącznie koszt zasobów strony bazy danych; nie uwzględnia kosztu pracy
+  administracyjnej, transferu danych ani wysokiej dostępności, które w~praktyce różnicują
+  modele IaaS i~PaaS na korzyść usługi zarządzanej.
+\end{itemize}
+
+\section{Kierunki dalszych prac}
+\label{sec:podsumowanie-dalsze}
+
+\begin{itemize}
+  \item Powtórzenie porównania z~maszyną wirtualną bez mechanizmu kredytowego (np. seria
+  Dsv5), aby oddzielić wpływ modelu wdrożenia od klasy jednostki obliczeniowej.
+  \item Rozszerzenie o~inne profile obciążenia (tylko odczyt, obciążenie mieszane, większa skala
+  bazy i~liczba klientów) oraz o~dyski Premium SSD v2 z~niezależnie konfigurowanymi IOPS.
+  \item Uwzględnienie konfiguracji wysokiej dostępności (replikacja, strefy dostępności)
+  i~kosztu ich utrzymania w~obu modelach.
+  \item Model kosztów uwzględniający rezerwacje i~plany oszczędnościowe oraz koszt pracy
+  administracyjnej (całkowity koszt posiadania).
+  \item Uzupełnienie procedury burn-inu o~wykrywanie gwałtownego odnowienia puli kredytów
+  i~ponowny drenaż w~takim przypadku.
+\end{itemize}

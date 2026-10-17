@@ -232,8 +232,9 @@ def comma(x, _pos=None):
 
 def save(fig, name):
     os.makedirs(os.path.join(OUT, "figures"), exist_ok=True)
-    for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(OUT, "figures", f"{name}.{ext}"), dpi=200 if ext == "png" else None)
+    # No creation date in the files, so an unchanged figure stays byte-identical.
+    fig.savefig(os.path.join(OUT, "figures", f"{name}.pdf"), metadata={"CreationDate": None, "ModDate": None})
+    fig.savefig(os.path.join(OUT, "figures", f"{name}.png"), dpi=200, metadata={"Software": None})
 
 
 def legend_models(ax, loc="lower right"):
