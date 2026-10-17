@@ -12,7 +12,7 @@ w~chmurze Microsoft Azure w~modelach IaaS i~PaaS, obejmująca wydajność, wykor
 obliczeniowych oraz efektywność finansową. Cel zrealizowano w~trzech krokach. Po pierwsze,
 zaprojektowano i~zautomatyzowano za pomocą Terraform dwa warianty środowisk: samodzielnie
 skonfigurowany serwer PostgreSQL na maszynie wirtualnej z~dwoma tierami dysku (Standard SSD
-i~Premium SSD) oraz usługę zarządzaną Azure Database for PostgreSQL --- Flexible Server
+i~Premium SSD) oraz usługę zarządzaną Azure Database for PostgreSQL -- Flexible Server
 w~dwóch tierach obliczeniowych (Burstable i~General Purpose). Każde środowisko było tworzone
 na czas sesji pomiarowej i~usuwane bezpośrednio po niej, a~konfiguracja PostgreSQL na
 maszynie wirtualnej została wyrównana z~ustawieniami, które platforma stosuje w~usłudze
@@ -31,7 +31,7 @@ transakcji na dolara.
   SSD ($936 \pm 44$~TPS), a~99. percentyl opóźnienia niższy ($47$ wobec $69$~ms). Przewagę
   tę tłumaczą dwa czynniki ustalone w~eksperymencie wyjaśniającym: pamięć podręczna hosta,
   przez którą usługa zarządzana obsługuje większość odczytów poza limitem dysku, oraz klasa
-  jednostki obliczeniowej --- 2~vCore bez mechanizmu kredytowego wobec maszyny
+  jednostki obliczeniowej -- 2~vCore bez mechanizmu kredytowego wobec maszyny
   \texttt{Standard\_B2s\_v2} z~poziomem bazowym 40\%. Samo włączenie pamięci podręcznej
   odczytu na maszynie wirtualnej usunęło wąskie gardło dyskowe, ale zwiększyło przepustowość
   tylko o~ok. 3,5\%, ponieważ ograniczeniem stał się poziom bazowy procesora.
@@ -64,7 +64,7 @@ transakcji na dolara.
   w~metodyce.} Pomiar wykonany bezpośrednio po wdrożeniu zawyżyłby wydajność IaaS Premium SSD
   o~ok. jedną trzecią. Zmienność wyników między kolejnymi wdrożeniami tej samej konfiguracji
   przewyższała w~części konfiguracji zmienność między powtórzeniami na jednym wdrożeniu, więc
-  rzetelny przedział ufności wymaga wielu niezależnych wdrożeń --- co w~praktyce jest możliwe
+  rzetelny przedział ufności wymaga wielu niezależnych wdrożeń -- co w~praktyce jest możliwe
   dzięki automatyzacji infrastruktury jako kodu i~niskiemu kosztowi środowisk efemerycznych
   (cała kampania z~pilotażem kosztowała ok. 20~USD).
 \end{enumerate}
@@ -79,8 +79,8 @@ transakcji na dolara.
   (bez mechanizmu kredytowego) okazała się niedostępna dla subskrypcji Azure for Students,
   podobnie jak region Poland Central; użyto maszyny \texttt{Standard\_B2s\_v2} w~regionie
   Belgium Central. Porównanie IaaS z~PaaS General Purpose zestawia więc maszynę klasy
-  burstable z~jednostką obliczeniową bez mechanizmu kredytowego, co --- jak pokazał
-  eksperyment wyjaśniający --- odpowiada za część różnicy wydajności. Na głównych
+  burstable z~jednostką obliczeniową bez mechanizmu kredytowego, co -- jak pokazał
+  eksperyment wyjaśniający -- odpowiada za część różnicy wydajności. Na głównych
   konfiguracjach IaaS kredyty CPU nie były wyczerpywane (procesor pracował poniżej poziomu
   bazowego), więc nie ograniczały wyników.
   \item \textbf{Pamięć podręczna hosta.} Dysk danych IaaS pracował bez pamięci podręcznej
@@ -115,7 +115,7 @@ transakcji na dolara.
   \item \textbf{Jedno obciążenie.} Wyniki dotyczą obciążenia TPC-B-podobnego narzędzia pgbench
   (losowe, krótkie transakcje zapisujące) dla bazy 14,6~GiB i~25~klientów. Obciążenia
   zdominowane przez odczyty, analityczne lub z~bazą mieszczącą się w~pamięci mogą dać inną
-  kolejność konfiguracji --- w~szczególności inną relację kosztu dysku Standard SSD, którego
+  kolejność konfiguracji -- w~szczególności inną relację kosztu dysku Standard SSD, którego
   opłata transakcyjna zależy od liczby operacji.
   \item \textbf{Jeden region, jeden okres, jedna subskrypcja.} Pomiary wykonano w~regionie
   Belgium Central w~październiku 2026~r.; wydajność współdzielonej infrastruktury może
